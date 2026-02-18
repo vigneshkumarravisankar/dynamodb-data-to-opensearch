@@ -5,12 +5,43 @@ import logging
 from typing import Any
 
 import boto3
+import openai
 from dotenv import load_dotenv
 from opensearchpy import OpenSearch, RequestsHttpConnection, helpers
 from requests_aws4auth import AWS4Auth
 from sentence_transformers import SentenceTransformer
+from openai import OpenAI
+
 
 load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise EnvironmentError("Missing OPENAI_API_KEY in environment variables or .env file.")
+openai.api_key = OPENAI_API_KEY
+
+
+
+def get_openai_client():
+    """
+    Create an OpenAI client with API key from Secrets Manager.
+    
+    Returns:
+        OpenAI client or None if key not available
+    """
+    try:
+        api_key = OPENAI_API_KEY
+        if api_key:
+            return OpenAI(api_key=api_key)
+    except Exception as e:
+        print(f"⚠️ Failed to get OpenAI API key from Secrets Manager: {e}")
+    
+    # Fallback to environment variable
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        return OpenAI(api_key=api_key)
+    
+    return None
+
 
 # ── Logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -357,21 +388,18 @@ Question: {query}
 Answer:"""
 
     try:
-        response = bedrock_client.invoke_model(
-            modelId="anthropic.claude-3-sonnet-20240229-v1:0",
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 1024,
-                "messages": [
+        client = get_openai_client()
+        response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
                     {"role": "user", "content": prompt}
-                ]
-            })
-        )
-        answer = json.loads(response["body"].read())
-        return answer["content"][0]["text"]
-
+                ],
+                temperature=0.2,
+                max_tokens=2000
+            )
+            
+            
+        return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"Answer generation error: {e}")
         return None
@@ -393,7 +421,7 @@ def main() -> None:
     logger.info("=" * 60)
 
     # Change this to your actual query
-    query = "your search question here"
+    query = "Can you list the frameworks available in the dataset and their descriptions?"
 
     results = rag_search(query, top_k=5)
     answer = generate_answer(query, results)
