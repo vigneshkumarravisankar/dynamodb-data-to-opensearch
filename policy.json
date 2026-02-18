@@ -1,0 +1,13 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "es:UpdateDomainConfig",
+        "es:UpdateElasticsearchDomainConfig"
+      ],
+      "Resource": "arn:aws:es:us-east-1:050752622938:domain/search-dynamo-data-as-rag-rwyjxqyet2jocvjop2d3bd5nzu"
+    }
+  ]
+}

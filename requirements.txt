@@ -1,0 +1,4 @@
+opensearch-py
+requests-aws4auth
+boto3
+python-dotenv
