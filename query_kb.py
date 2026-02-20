@@ -89,7 +89,8 @@ def retrieve_and_generate(query: str, top_k: int = 5) -> dict:
                 "content": f"Context:\n{context}\n\nQuestion: {query}"
             }
         ],
-        temperature=0.2
+        temperature=0.2,
+        max_tokens=10000
     )
 
     return {
