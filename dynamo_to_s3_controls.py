@@ -366,8 +366,35 @@ def scan_and_upload():
             else:
                 display = str(name_field)
 
+            # Build list of associated framework IDs from frameworkControlIds field
+            associated_fw_ids = []
+            fc_ids = record.get("frameworkControlIds", [])
+            if isinstance(fc_ids, list):
+                for fc_item in fc_ids:
+                    if isinstance(fc_item, dict):
+                        for fid in fc_item.keys():
+                            if fid not in associated_fw_ids:
+                                associated_fw_ids.append(fid)
+
+            # Upload metadata file for Bedrock KB filtering
+            metadata = {
+                "metadataAttributes": {
+                    "control_id": ctrl_id,
+                    "control_name": display,
+                    "doc_type": "control",
+                    "framework_ids_associated": associated_fw_ids
+                }
+            }
+            metadata_key = f"{S3_PREFIX}/{ctrl_id}.md.metadata.json"
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=metadata_key,
+                Body=json.dumps(metadata).encode("utf-8"),
+                ContentType="application/json"
+            )
+
             uploaded += 1
-            print(f"  ✅ {ctrl_id} — {display} ({len(content)} chars)")
+            print(f"  ✅ {ctrl_id} — {display} ({len(content)} chars) — metadata uploaded (frameworks: {associated_fw_ids})")
 
         except Exception as e:
             record_id = record.get("id", "unknown")

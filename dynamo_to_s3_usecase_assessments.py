@@ -1049,8 +1049,30 @@ def scan_and_upload():
                 ContentType="text/markdown"
             )
 
+            # Upload metadata file for Bedrock KB filtering
+            risk_fw_id = record.get("riskframeworkid", "")
+            associated_frameworks = [risk_fw_id] if risk_fw_id else []
+
+            metadata = {
+                "metadataAttributes": {
+                    "usecase_id": uc_id,
+                    "model_name": model_name,
+                    "doc_type": "usecase-assessment",
+                    "ai_category": record.get("aiCategory", ""),
+                    "overall_risk": record.get("overallRisk", ""),
+                    "framework_ids_associated": associated_frameworks
+                }
+            }
+            metadata_key = f"{S3_PREFIX}/{uc_id}.md.metadata.json"
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=metadata_key,
+                Body=json.dumps(metadata).encode("utf-8"),
+                ContentType="application/json"
+            )
+
             uploaded += 1
-            print(f"  ✅ {uc_id} — {model_name} ({len(content)} chars)")
+            print(f"  ✅ {uc_id} — {model_name} ({len(content)} chars) — metadata uploaded (fw: {associated_frameworks})")
 
         except Exception as e:
             record_id = record.get("id", "unknown")

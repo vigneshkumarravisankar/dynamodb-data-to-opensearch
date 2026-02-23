@@ -343,8 +343,25 @@ def scan_and_upload():
                 ContentType="text/markdown"
             )
 
+            # Upload metadata file for Bedrock KB filtering
+            metadata_key = f"{S3_PREFIX}/{fw_id}.md.metadata.json"
+            metadata = {
+                "metadataAttributes": {
+                    "framework_id": fw_id,
+                    "framework_name": fw_name,
+                    "doc_type": "framework-controls",
+                    "control_ids_associated": ctrl_ids
+                }
+            }
+            s3.put_object(
+                Bucket=S3_BUCKET,
+                Key=metadata_key,
+                Body=json.dumps(metadata).encode("utf-8"),
+                ContentType="application/json"
+            )
+
             uploaded += 1
-            print(f"  ✅ {fw_name} ({fw_id}) — {len(ctrl_ids)} controls — {len(content)} chars")
+            print(f"  ✅ {fw_name} ({fw_id}) — {len(ctrl_ids)} controls — {len(content)} chars — metadata uploaded")
 
         except Exception as e:
             print(f"  ❌ Failed: {fw_id} — {e}")
