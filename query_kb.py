@@ -38,6 +38,53 @@ def extract_control_id(query: str) -> str | None:
     return match.group(1).upper() if match else None
 
 
+def is_usecase_query(query: str) -> bool:
+    """Detect whether the query is about a use case / use-case assessment."""
+    usecase_keywords = [
+        "use case", "usecase", "use-case", "assessment",
+        "model name", "modelname", "ai project", "inventory",
+        "design document", "tco", "rollout", "jira stories",
+        "bill of material", "bom", "risk and controls",
+        "overall risk", "ai category"
+    ]
+    q_lower = query.lower()
+    return any(kw in q_lower for kw in usecase_keywords)
+
+
+# ── Query-based token budget ────────────────────────────────────────
+# Maps query intent to (summary_max_tokens, answer_max_tokens) so we
+# spend only the tokens the question actually needs.
+_QUERY_TOKEN_PROFILES: list[tuple[list[str], int, int]] = [
+    # Narrow / single-field look-ups → small summary, short answer
+    (["overall risk", "risk level", "ai category", "status",
+      "department", "sector", "vendor", "priority",
+      "cloud provider", "platform"], 500, 1000),
+    # Medium-depth questions → moderate summary & answer
+    (["list controls", "list frameworks", "jira stories",
+      "acceptance criteria", "metrics", "rollout",
+      "epics", "data labels", "bill of material", "bom",
+      "summary", "describe"], 1500, 4000),
+    # Deep / multi-section questions → larger budget
+    (["design document", "tco", "cost", "architecture",
+      "api design", "security", "compliance",
+      "risk and controls", "full detail", "everything"], 3000, 8000),
+]
+
+
+def _token_budget_for_query(query: str) -> tuple[int, int]:
+    """
+    Return (summary_max_tokens, answer_max_tokens) tuned to the query intent.
+    Heavier questions get a larger budget; simple look-ups get a small one.
+    """
+    q_lower = query.lower()
+    # Walk profiles from narrowest → widest; last match wins (deepest)
+    summary_tok, answer_tok = 1500, 4000          # sensible default
+    for keywords, s_tok, a_tok in _QUERY_TOKEN_PROFILES:
+        if any(kw in q_lower for kw in keywords):
+            summary_tok, answer_tok = s_tok, a_tok  # keep scanning
+    return summary_tok, answer_tok
+
+
 # ───────────────────────────────────────────────────────────────────
 # 1. RETRIEVE ONLY — Get relevant chunks from Bedrock KB
 # ───────────────────────────────────────────────────────────────────
@@ -96,7 +143,57 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
 
 
 # ───────────────────────────────────────────────────────────────────
-# 2. RETRIEVE + OPENAI GENERATE — Full RAG pipeline
+# 2a. SUMMARISE A SINGLE CHUNK — used for large use-case documents
+# ───────────────────────────────────────────────────────────────────
+def summarize_content(content: str, query: str, max_tokens: int = 1500) -> str:
+    """
+    Summarise a large retrieved chunk (e.g. a full use-case markdown)
+    into a concise, query-focused summary before handing it to the
+    final answer-generation step.  Token budget is driven by the query
+    complexity so simple look-ups stay cheap.
+    """
+    response = openai_client.chat.completions.create(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise summarisation assistant. "
+                    "Given a large AI-governance / use-case document and the "
+                    "user's question, produce a **concise summary** that "
+                    "retains ONLY the facts and details relevant to "
+                    "answering the question.\n\n"
+                    "Rules:\n"
+                    "- NEVER expose raw internal IDs (e.g. AI-ADF-013, AI-CTRL-00001, "
+                    "inventory IDs, Jira issue keys). Instead, refer to items by their "
+                    "descriptive name, title, or purpose. For example, say "
+                    "'the EU AI Act Compliance framework' instead of 'AI-ADF-013'.\n"
+                    "- Keep names, numbers, and dates verbatim.\n"
+                    "- When summarising Jira stories, ALWAYS include the associated \n"
+                    "  gaps / sub-tasks for each story (gap name and description). \n"
+                    "  A story without its gaps is incomplete.\n"
+                    "- Drop sections that have no bearing on the question.\n"
+                    "- Do NOT add information that is not in the document.\n"
+                    "- Output plain text (no markdown headers).\n"
+                    "- Be as brief as the question allows."
+                )
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Question the user will ask next:\n{query}\n\n"
+                    f"--- DOCUMENT START ---\n{content}\n--- DOCUMENT END ---"
+                )
+            }
+        ],
+        temperature=0.0,
+        max_tokens=max_tokens
+    )
+    return response.choices[0].message.content
+
+
+# ───────────────────────────────────────────────────────────────────
+# 2b. RETRIEVE + OPENAI GENERATE — Full RAG pipeline
 # ───────────────────────────────────────────────────────────────────
 def retrieve_and_generate(query: str, top_k: int = 5) -> dict:
     """
@@ -115,12 +212,26 @@ def retrieve_and_generate(query: str, top_k: int = 5) -> dict:
             "source_match": False
         }
 
-    # Step 2: Build context from retrieved chunks
-    context = "\n\n---\n\n".join(
-        f"[Source: {chunk['source']}]\n{chunk['content']}" for chunk in chunks
-    )
+    # Step 2: Compute query-aware token budgets
+    summary_budget, answer_budget = _token_budget_for_query(query)
 
-    # Step 3: Generate answer using OpenAI
+    # Step 3: Build context — for use-case queries, summarise chunk 1 only
+    if is_usecase_query(query):
+        top_chunk = chunks[0]
+        summarised = summarize_content(
+            top_chunk["content"], query, max_tokens=summary_budget
+        )
+        context = f"[Source: {top_chunk['source']}]\n{summarised}"
+        # Narrow sources to the single chunk actually used
+        chunks = [top_chunk]
+    else:
+        context = "\n\n---\n\n".join(
+            f"[Source: {chunk['source']}]\n{chunk['content']}" for chunk in chunks
+        )
+
+    
+    print("Context: ",context)
+    # Step 4: Generate answer using OpenAI (budget tuned to query)
     response = openai_client.chat.completions.create(
         model=os.getenv("OPENAI_MODEL", "gpt-4o"),
         messages=[
@@ -130,10 +241,21 @@ def retrieve_and_generate(query: str, top_k: int = 5) -> dict:
                     "You are a helpful AI assistant answering questions about AI governance frameworks, "
                     "risk controls, and AI inventory records.\n\n"
                     "Use ONLY the information from the provided context to answer. "
-                    "If the context doesn't contain enough information, say so clearly. "
-                    "Cite the sources when possible.\n\n"
-                    "IMPORTANT: Only reference IDs and data explicitly present in the context. "
-                    "Do NOT guess or infer IDs that are not in the provided documents."
+                    "If the context doesn't contain enough information, say so clearly.\n\n"
+                    "CRITICAL FORMATTING RULES (these apply to EVERY answer):\n"
+                    "- NEVER show raw internal IDs such as framework IDs (AI-ADF-013), "
+                    "control IDs (AI-CTRL-00001), inventory IDs, use-case IDs, "
+                    "component IDs, or Jira issue keys.\n"
+                    "- Instead, always refer to items by their human-readable name, "
+                    "title, or description. For example write "
+                    "'the EU AI Act Compliance framework' rather than 'AI-ADF-013', "
+                    "or 'the Bias Detection control' rather than 'AI-CTRL-00042'.\n"
+                    "- When mentioning Jira stories, ALWAYS include the associated \n"
+                    "  gaps / sub-tasks for each story (gap name and description). \n"
+                    "  Present each story together with its gaps so the user sees \n"
+                    "  what is missing or needs to be addressed.\n"
+                    "- Write in clear, complete sentences suitable for business users.\n"
+                    "- Do NOT guess or infer information that is not in the provided documents."
                 )
             },
             {
@@ -142,7 +264,7 @@ def retrieve_and_generate(query: str, top_k: int = 5) -> dict:
             }
         ],
         temperature=0.1,
-        max_tokens=10000
+        max_tokens=answer_budget
     )
 
     # Compute retrieval accuracy metrics
