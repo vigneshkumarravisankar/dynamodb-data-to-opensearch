@@ -340,7 +340,7 @@ def flatten_metrics(record: dict) -> list[str]:
 
     lines = []
     lines.append("")
-    lines.append("## Performance Metrics")
+    lines.append("## Key Performance Indicators")
     lines.append("")
 
     for m in metrics:
