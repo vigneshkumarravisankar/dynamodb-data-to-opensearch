@@ -12,6 +12,7 @@ assessment with deeply nested data including:
   - TCO (Total Cost of Ownership breakdown)
   - Metrics (performance thresholds)
   - Rollout Plan (phased deployment)
+  - Model Validation Assessment (control items, justifications, risk mitigations)
 
 Each use case gets its own enriched markdown document in S3.
 """
@@ -37,6 +38,11 @@ USECASE_TABLE = os.getenv(
     "staging-fusefy-usecaseAssessments-d66cb7c7-04ac-4634-927f-06d91afa39bf"
 )
 FRAMEWORKS_TABLE = os.getenv("DYNAMODB_TABLE", "staging-fusefy-frameworks")
+CONTROLS_TABLE = os.getenv("DYNAMODB_CONTROLS_TABLE", "staging-fusefy-controls")
+MODEL_VALIDATION_TABLE = os.getenv(
+    "DYNAMODB_MODEL_VALIDATION_TABLE",
+    "staging-fusefy-modelValidation-d66cb7c7-04ac-4634-927f-06d91afa39bf"
+)
 
 # ── Clients ─────────────────────────────────────────────────────────
 dynamodb = boto3.client("dynamodb", region_name=REGION)
@@ -195,6 +201,8 @@ def flatten_overview(record: dict, framework_lookup: dict = None) -> list[str]:
         lines.append(f"**Design Document Generation Status:** {record['aiProgressGeneratingStatus']}")
     if record.get("vendorName"):
         lines.append(f"**Vendor:** {record['vendorName']}")
+    if record.get("modelValidationAssessmentId"):
+        lines.append(f"**Model Validation Assessment ID:** {record['modelValidationAssessmentId']}")
 
     # Data labels
     if record.get("dataLabels"):
@@ -941,6 +949,314 @@ def flatten_tco(record: dict) -> list[str]:
 
 
 # ───────────────────────────────────────────────────────────────────
+# 12b. FLATTEN: Model Validation Assessment
+# ───────────────────────────────────────────────────────────────────
+def flatten_model_validation(
+    record: dict,
+    model_validation_lookup: dict = None,
+    controls_lookup: dict = None,
+    framework_lookup: dict = None,
+    framework_controls_grouped: dict = None,
+) -> list[str]:
+    """Flatten the model validation assessment into readable sections."""
+    if model_validation_lookup is None:
+        model_validation_lookup = {}
+    if controls_lookup is None:
+        controls_lookup = {}
+    if framework_lookup is None:
+        framework_lookup = {}
+    if framework_controls_grouped is None:
+        framework_controls_grouped = {}
+
+    mv_id = record.get("modelValidationAssessmentId")
+    if not mv_id:
+        return []
+
+    mv = model_validation_lookup.get(mv_id)
+    if not mv:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("## Model Validation Assessment")
+    lines.append("")
+    lines.append(f"**Validation ID:** {mv_id}")
+    if mv.get("name"):
+        lines.append(f"**Validation Name:** {mv['name']}")
+    if mv.get("validationStatus"):
+        lines.append(f"**Validation Status:** {mv['validationStatus']}")
+    if mv.get("isGradingCompleted") is not None:
+        lines.append(f"**Grading Completed:** {mv['isGradingCompleted']}")
+    if mv.get("isJustificationCompleted") is not None:
+        lines.append(f"**Justification Completed:** {mv['isJustificationCompleted']}")
+    if mv.get("isRemediationAvailable") is not None:
+        lines.append(f"**Remediation Available:** {mv['isRemediationAvailable']}")
+    lines.append("")
+
+    # ── Risk Framework ──
+    fw_id = mv.get("frameworkId", "")
+    fw_name = mv.get("frameworkName", "")
+    lines.append("### Risk Framework")
+    lines.append("")
+    if fw_id:
+        lines.append(f"**Framework ID:** {fw_id}")
+    if fw_name:
+        lines.append(f"**Framework Name:** {fw_name}")
+
+    # Risk & Controls summary (from use case record) under the framework
+    rac = record.get("riskAndControls")
+    if rac and isinstance(rac, dict):
+        fw_ctx = rac.get("frameworkContext", {})
+        if isinstance(fw_ctx, dict) and fw_ctx.get("description"):
+            lines.append(f"**Framework Description:** {fw_ctx['description']}")
+
+        # Summary
+        summary = rac.get("summary", {})
+        if summary and isinstance(summary, dict):
+            lines.append(f"**Overall Risk Posture:** {summary.get('overallRiskPosture', 'N/A')}")
+            lines.append(f"**Risks Identified:** {summary.get('risksIdentified', 'N/A')}")
+            lines.append(f"**Applicable Controls:** {summary.get('applicableControls', 'N/A')}")
+            lines.append(f"**Total Framework Controls:** {summary.get('totalFrameworkControls', 'N/A')}")
+
+            sev = summary.get("severityBreakdown", {})
+            if sev and isinstance(sev, dict):
+                parts = []
+                for level in ["critical", "high", "medium", "low"]:
+                    if sev.get(level) is not None:
+                        parts.append(f"{level.capitalize()}: {sev[level]}")
+                if parts:
+                    lines.append(f"**Severity Breakdown:** {', '.join(parts)}")
+
+        # Assessment Insights
+        insights = rac.get("assessmentInsights", {})
+        if insights and isinstance(insights, dict):
+            if insights.get("riskApplicabilitySummary"):
+                lines.append(f"**Risk Applicability:** {insights['riskApplicabilitySummary']}")
+            if insights.get("residualRiskOverview"):
+                lines.append(f"**Residual Risk:** {insights['residualRiskOverview']}")
+            if insights.get("keyTakeaways"):
+                lines.append(f"**Key Takeaways:** {insights['keyTakeaways']}")
+
+        # Control Coverage
+        coverage = rac.get("controlCoverage", {})
+        if coverage and isinstance(coverage, dict):
+            lines.append("")
+            lines.append("#### Control Coverage")
+            covered = coverage.get("covered", [])
+            if covered and isinstance(covered, list):
+                lines.append(f"- **Covered ({len(covered)}):** {', '.join(str(c) for c in covered)}")
+            partial = coverage.get("partial", [])
+            if partial and isinstance(partial, list):
+                lines.append(f"- **Partial ({len(partial)}):** {', '.join(str(c) for c in partial)}")
+            gap = coverage.get("gap", [])
+            if gap and isinstance(gap, list):
+                lines.append(f"- **Gap ({len(gap)}):** {', '.join(str(c) for c in gap)}")
+
+        # Risk Categories with mapped controls
+        risk_cats = rac.get("riskCategories", [])
+        if risk_cats and isinstance(risk_cats, list):
+            lines.append("")
+            lines.append("#### Risk Categories")
+            lines.append("")
+            for cat in risk_cats:
+                if not isinstance(cat, dict):
+                    continue
+                cat_name = cat.get("categoryName", "Unknown")
+                lines.append(f"**{cat_name}:**")
+
+                risks = cat.get("risks", [])
+                if isinstance(risks, list):
+                    for risk in risks:
+                        if not isinstance(risk, dict):
+                            continue
+                        risk_id = risk.get("riskId", "")
+                        severity = risk.get("severity", "")
+                        reason = risk.get("applicabilityReason", "")
+
+                        lines.append(f"- **{risk_id}** (Severity: {severity})")
+                        if reason:
+                            lines.append(f"  - Reason: {reason}")
+
+                        mapped = risk.get("mappedControlIds", [])
+                        if isinstance(mapped, list):
+                            for ctrl in mapped:
+                                if isinstance(ctrl, dict):
+                                    ctrl_id_r = ctrl.get("controlId", "")
+                                    ctrl_name_r = ctrl.get("controlName", "")
+                                    ctrl_desc_r = ctrl.get("controlDescription", "")
+                                    lines.append(f"  - Control: **{ctrl_id_r}** — {ctrl_name_r}")
+                                    if ctrl_desc_r:
+                                        lines.append(f"    - {ctrl_desc_r}")
+                lines.append("")
+
+    lines.append("")
+
+    # ── KCIs (Key Control Indicators) ──
+    items = mv.get("items", [])
+    if items and isinstance(items, list):
+        # Group by implementation status for summary
+        met_count = sum(1 for i in items if isinstance(i, dict) and i.get("implementationStatus") == "Met")
+        partial_count = sum(1 for i in items if isinstance(i, dict) and i.get("implementationStatus") == "Partially met")
+        not_met_count = sum(1 for i in items if isinstance(i, dict) and i.get("implementationStatus") == "Not met")
+
+        lines.append("### KCIs (Key Control Indicators)")
+        lines.append("")
+        lines.append(f"- **Total Controls:** {len(items)}")
+        lines.append(f"- **Met:** {met_count}")
+        lines.append(f"- **Partially Met:** {partial_count}")
+        lines.append(f"- **Not Met:** {not_met_count}")
+        lines.append("")
+
+        # ── KCI Controls Attached (from Risk Framework) ──
+        risk_fw_id = record.get("riskframeworkid", "")
+        attached_ctrl_ids = framework_controls_grouped.get(risk_fw_id, []) if risk_fw_id else []
+        if attached_ctrl_ids:
+            fw_detail = framework_lookup.get(risk_fw_id, {})
+            fw_display_name = fw_detail.get("name", risk_fw_id)
+            lines.append(f"#### KCI Controls Attached — {fw_display_name} ({risk_fw_id})")
+            lines.append(f"**Total Attached Controls:** {len(attached_ctrl_ids)}")
+            lines.append("")
+            for idx, ac_id in enumerate(attached_ctrl_ids, 1):
+                ac = controls_lookup.get(ac_id)
+                if ac:
+                    ac_name_field = ac.get("name", ac_id)
+                    if isinstance(ac_name_field, list) and ac_name_field:
+                        ac_display = ac_name_field[-1]
+                        ac_hierarchy = " > ".join(str(n) for n in ac_name_field)
+                    else:
+                        ac_display = str(ac_name_field)
+                        ac_hierarchy = None
+                    lines.append(f"{idx}. **{ac_id}** — {ac_display}")
+                    if ac_hierarchy:
+                        lines.append(f"   - Hierarchy: {ac_hierarchy}")
+                    if ac.get("questionaire"):
+                        lines.append(f"   - Question: {ac['questionaire']}")
+                    if ac.get("trustworthyAiControl"):
+                        lines.append(f"   - Trustworthy AI Control: {ac['trustworthyAiControl']}")
+                    if ac.get("aiLifecycleStage"):
+                        lines.append(f"   - AI Lifecycle Stage: {ac['aiLifecycleStage']}")
+                else:
+                    lines.append(f"{idx}. **{ac_id}** — (not found in controls table)")
+            lines.append("")
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            ctrl_id = item.get("id", "Unknown")
+            name_list = item.get("name", [])
+            if isinstance(name_list, list) and name_list:
+                ctrl_display = name_list[-1] if name_list else ctrl_id
+                ctrl_hierarchy = " > ".join(str(n) for n in name_list)
+            else:
+                ctrl_display = str(name_list)
+                ctrl_hierarchy = None
+
+            lines.append(f"#### {ctrl_id} — {ctrl_display}")
+            if ctrl_hierarchy:
+                lines.append(f"- **Hierarchy:** {ctrl_hierarchy}")
+
+            if item.get("trustworthyAiControl"):
+                lines.append(f"- **Trustworthy AI Control:** {item['trustworthyAiControl']}")
+            if item.get("aiLifecycleStage"):
+                lines.append(f"- **AI Lifecycle Stage:** {item['aiLifecycleStage']}")
+            if item.get("classificationLevel"):
+                lines.append(f"- **Classification Level:** {item['classificationLevel']}")
+            if item.get("implementationStatus"):
+                lines.append(f"- **Implementation Status:** {item['implementationStatus']}")
+            if item.get("jiraStatus"):
+                lines.append(f"- **Jira Status:** {item['jiraStatus']}")
+            if item.get("jiraTask"):
+                lines.append(f"- **Jira Task:** {item['jiraTask']}")
+
+            # Deployment stages
+            deploy_stages = item.get("deploymentStages", [])
+            if isinstance(deploy_stages, list) and deploy_stages:
+                lines.append(f"- **Deployment Stages:** {', '.join(str(s) for s in deploy_stages)}")
+
+            if item.get("description"):
+                lines.append(f"- **Description:** {item['description']}")
+            if item.get("questionaire"):
+                lines.append(f"- **Assessment Question:** {item['questionaire']}")
+
+            # Justification
+            justification = item.get("Justification", {})
+            if isinstance(justification, dict) and justification.get("justification"):
+                lines.append(f"- **Justification:** {justification['justification']}")
+
+            if item.get("riskMitigation"):
+                lines.append(f"- **Risk Mitigation:** {item['riskMitigation']}")
+            if item.get("riskScore") is not None:
+                lines.append(f"- **Risk Score:** {item['riskScore']}")
+
+            # Assessment categories
+            assess_cats = item.get("assessmentCategory", [])
+            if isinstance(assess_cats, list) and assess_cats:
+                lines.append(f"- **Assessment Categories:** {', '.join(str(c) for c in assess_cats)}")
+
+            # Framework control IDs
+            fw_ctrl_ids = item.get("frameworkControlIds", [])
+            if isinstance(fw_ctrl_ids, list) and fw_ctrl_ids:
+                fw_parts = []
+                for fw_entry in fw_ctrl_ids:
+                    if isinstance(fw_entry, dict):
+                        for fw_id_k, fw_name_k in fw_entry.items():
+                            fw_parts.append(f"{fw_id_k} ({fw_name_k})")
+                if fw_parts:
+                    lines.append(f"- **Associated Frameworks:** {', '.join(fw_parts)}")
+
+            # ── Control Details (from staging-fusefy-controls) ──
+            ctrl_record = controls_lookup.get(ctrl_id)
+            if ctrl_record:
+                lines.append("")
+                lines.append(f"##### Control Details — {ctrl_id}")
+
+                ctrl_name_field = ctrl_record.get("name", [])
+                if isinstance(ctrl_name_field, list) and ctrl_name_field:
+                    ctrl_full_hierarchy = " > ".join(str(n) for n in ctrl_name_field)
+                    lines.append(f"- **Control Hierarchy:** {ctrl_full_hierarchy}")
+
+                if ctrl_record.get("questionaire"):
+                    lines.append(f"- **Assessment Question:** {ctrl_record['questionaire']}")
+                if ctrl_record.get("aiLifecycleStage"):
+                    lines.append(f"- **AI Lifecycle Stage:** {ctrl_record['aiLifecycleStage']}")
+                if ctrl_record.get("trustworthyAiControl"):
+                    lines.append(f"- **Trustworthy AI Control:** {ctrl_record['trustworthyAiControl']}")
+                if ctrl_record.get("assessmentCategory"):
+                    cats = ctrl_record["assessmentCategory"]
+                    if isinstance(cats, list):
+                        lines.append(f"- **Assessment Categories:** {', '.join(str(c) for c in cats)}")
+                    else:
+                        lines.append(f"- **Assessment Categories:** {cats}")
+                if ctrl_record.get("gradingTypesFormat"):
+                    lines.append(f"- **Grading Format:** {ctrl_record['gradingTypesFormat']}")
+
+                # AI Maturity Levels from control
+                active_levels = []
+                for lvl_key in ["Level 1", "Level 2", "Level 3", "Level 4", "Level 5", "Level 6"]:
+                    val = ctrl_record.get(lvl_key, "")
+                    if val and isinstance(val, str) and val.strip():
+                        active_levels.append(lvl_key)
+                if active_levels:
+                    lines.append(f"- **AI Maturity Levels:** {', '.join(active_levels)}")
+
+                # Associated frameworks from control record
+                ctrl_fw_ids = ctrl_record.get("frameworkControlIds", [])
+                if isinstance(ctrl_fw_ids, list) and ctrl_fw_ids:
+                    fw_parts_ctrl = []
+                    for fw_entry in ctrl_fw_ids:
+                        if isinstance(fw_entry, dict):
+                            for fw_id_k, fw_name_k in fw_entry.items():
+                                fw_parts_ctrl.append(f"{fw_id_k} ({fw_name_k})")
+                    if fw_parts_ctrl:
+                        lines.append(f"- **Frameworks:** {', '.join(fw_parts_ctrl)}")
+
+            lines.append("")
+
+    return lines
+
+
+# ───────────────────────────────────────────────────────────────────
 # 13. FLATTEN: Document Summary
 # ───────────────────────────────────────────────────────────────────
 def flatten_document_summary(record: dict) -> list[str]:
@@ -958,9 +1274,122 @@ def flatten_document_summary(record: dict) -> list[str]:
 
 
 # ───────────────────────────────────────────────────────────────────
-# 14. MASTER FLATTEN: Assemble full markdown
+# 14. FLATTEN: Risk Framework KCIs (Key Control Indicators)
 # ───────────────────────────────────────────────────────────────────
-def flatten_usecase_for_rag(record: dict, framework_lookup: dict = None) -> str:
+def flatten_framework_kcis(
+    record: dict,
+    framework_lookup: dict = None,
+    framework_controls_grouped: dict = None,
+    controls_lookup: dict = None,
+) -> list[str]:
+    """
+    Flatten risk-framework controls as KCIs for this use case.
+
+    Steps:
+      1. Get the riskframeworkid from the use case record
+      2. Look up the framework name from framework_lookup
+      3. Get all controlIds linked to that framework via framework_controls_grouped
+      4. Enrich each control from controls_lookup
+      5. Output as "Risk Framework → KCIs (Key Control Indicators)"
+    """
+    if framework_lookup is None:
+        framework_lookup = {}
+    if framework_controls_grouped is None:
+        framework_controls_grouped = {}
+    if controls_lookup is None:
+        controls_lookup = {}
+
+    risk_fw_id = record.get("riskframeworkid", "")
+    if not risk_fw_id:
+        return []
+
+    # Look up framework details
+    framework = framework_lookup.get(risk_fw_id, {})
+    fw_name = framework.get("name", risk_fw_id)
+    fw_description = framework.get("description", "")
+
+    # Get control IDs linked to this framework
+    control_ids = framework_controls_grouped.get(risk_fw_id, [])
+    if not control_ids:
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("## Risk Framework — Key Control Indicators (KCIs)")
+    lines.append("")
+    lines.append(f"**Risk Framework:** {fw_name}")
+    lines.append(f"**Framework ID:** {risk_fw_id}")
+    if fw_description:
+        lines.append(f"**Description:** {fw_description}")
+    lines.append(f"**Total KCIs:** {len(control_ids)}")
+    lines.append("")
+
+    for i, ctrl_id in enumerate(control_ids, 1):
+        ctrl = controls_lookup.get(ctrl_id)
+
+        if ctrl:
+            # name field is a hierarchical list: [lifecycle, platform, category, subcategory, control]
+            ctrl_name_field = ctrl.get("name", ctrl_id)
+            if isinstance(ctrl_name_field, list) and ctrl_name_field:
+                ctrl_display_name = ctrl_name_field[-1]  # last element = actual control name
+                ctrl_hierarchy = " > ".join(str(n) for n in ctrl_name_field)
+            else:
+                ctrl_display_name = str(ctrl_name_field)
+                ctrl_hierarchy = None
+
+            lines.append(f"### KCI {i}: {ctrl_display_name}")
+            lines.append(f"- **Control ID:** {ctrl.get('id', ctrl_id)}")
+
+            if ctrl.get("description"):
+                lines.append(f"- **Description:** {ctrl['description']}")
+
+            if ctrl_hierarchy:
+                lines.append(f"- **Hierarchy:** {ctrl_hierarchy}")
+
+            if ctrl.get("questionaire"):
+                lines.append(f"- **Question:** {ctrl['questionaire']}")
+
+            if ctrl.get("aiLifecycleStage"):
+                lines.append(f"- **AI Lifecycle Stage:** {ctrl['aiLifecycleStage']}")
+
+            if ctrl.get("trustworthyAiControl"):
+                lines.append(f"- **Trustworthy AI Control:** {ctrl['trustworthyAiControl']}")
+
+            if ctrl.get("assessmentCategory"):
+                cats = ctrl["assessmentCategory"]
+                if isinstance(cats, list):
+                    lines.append(f"- **Assessment Categories:** {', '.join(str(c) for c in cats)}")
+                else:
+                    lines.append(f"- **Assessment Categories:** {cats}")
+
+            if ctrl.get("gradingTypesFormat"):
+                lines.append(f"- **Grading Format:** {ctrl['gradingTypesFormat']}")
+
+            # Maturity Levels (Level 1 through Level 6)
+            levels = []
+            for lvl in range(1, 7):
+                key = f"Level {lvl}"
+                val = ctrl.get(key, "")
+                if val and str(val).strip():
+                    levels.append(f"L{lvl}: ✓")
+            if levels:
+                lines.append(f"- **Maturity Levels:** {', '.join(levels)}")
+
+            if ctrl.get("searchAttributesAsJson"):
+                lines.append(f"- **Search Keywords:** {ctrl['searchAttributesAsJson']}")
+        else:
+            lines.append(f"### KCI {i}: (Control not found)")
+            lines.append(f"- **Control ID:** {ctrl_id}")
+
+        lines.append("")
+
+    return lines
+
+
+# ───────────────────────────────────────────────────────────────────
+# 15. MASTER FLATTEN: Assemble full markdown
+# ───────────────────────────────────────────────────────────────────
+def flatten_usecase_for_rag(record: dict, framework_lookup: dict = None, model_validation_lookup: dict = None, controls_lookup: dict = None) -> str:
     """Assemble all sections into a complete RAG document."""
     all_lines = []
 
@@ -974,6 +1403,7 @@ def flatten_usecase_for_rag(record: dict, framework_lookup: dict = None) -> str:
     all_lines.extend(flatten_design_document(record))
     all_lines.extend(flatten_rollout_and_epics(record))
     all_lines.extend(flatten_tco(record))
+    all_lines.extend(flatten_model_validation(record, model_validation_lookup, controls_lookup))
 
     # Search keywords at the end for embedding
     if record.get("searchAttributesAsJson"):
@@ -1001,6 +1431,18 @@ def scan_and_upload():
     frameworks = scan_table(FRAMEWORKS_TABLE)
     framework_lookup = {fw["id"]: fw for fw in frameworks if "id" in fw}
     print(f"  ✅ {len(framework_lookup)} frameworks loaded for lookup")
+
+    # Scan model validation table for modelValidationAssessmentId resolution
+    print(f"\n📖 Loading model validations for assessment resolution...")
+    model_validations = scan_table(MODEL_VALIDATION_TABLE)
+    model_validation_lookup = {mv["id"]: mv for mv in model_validations if "id" in mv}
+    print(f"  ✅ {len(model_validation_lookup)} model validations loaded for lookup")
+
+    # Scan controls table for control details enrichment
+    print(f"\n📖 Loading controls for control detail enrichment...")
+    controls = scan_table(CONTROLS_TABLE)
+    controls_lookup = {ctrl["id"]: ctrl for ctrl in controls if "id" in ctrl}
+    print(f"  ✅ {len(controls_lookup)} controls loaded for lookup")
 
     if not records:
         print("⚠️  No records found. Exiting.")
@@ -1039,7 +1481,7 @@ def scan_and_upload():
             uc_id = record.get("id", f"unknown-{uploaded}")
             model_name = record.get("modelName", "Unknown")
 
-            content = flatten_usecase_for_rag(record, framework_lookup)
+            content = flatten_usecase_for_rag(record, framework_lookup, model_validation_lookup, controls_lookup)
             s3_key = f"{S3_PREFIX}/{uc_id}.md"
 
             s3.put_object(
@@ -1052,6 +1494,21 @@ def scan_and_upload():
             # Upload metadata file for Bedrock KB filtering
             risk_fw_id = record.get("riskframeworkid", "")
             associated_frameworks = [risk_fw_id] if risk_fw_id else []
+            mv_assessment_id = record.get("modelValidationAssessmentId", "")
+
+            # Gather model validation metadata
+            mv_meta = {}
+            if mv_assessment_id and mv_assessment_id in model_validation_lookup:
+                mv_record = model_validation_lookup[mv_assessment_id]
+                mv_meta = {
+                    "model_validation_id": mv_assessment_id,
+                    "model_validation_framework_id": mv_record.get("frameworkId", ""),
+                    "model_validation_framework_name": mv_record.get("frameworkName", ""),
+                    "model_validation_status": mv_record.get("validationStatus", ""),
+                    "model_validation_grading_completed": mv_record.get("isGradingCompleted", False),
+                    "model_validation_justification_completed": mv_record.get("isJustificationCompleted", False),
+                    "model_validation_remediation_available": mv_record.get("isRemediationAvailable", False),
+                }
 
             metadata = {
                 "metadataAttributes": {
@@ -1060,7 +1517,8 @@ def scan_and_upload():
                     "doc_type": "usecase-assessment",
                     "ai_category": record.get("aiCategory", ""),
                     "overall_risk": record.get("overallRisk", ""),
-                    "framework_ids_associated": associated_frameworks
+                    "framework_ids_associated": associated_frameworks,
+                    **mv_meta
                 }
             }
             metadata_key = f"{S3_PREFIX}/{uc_id}.md.metadata.json"
@@ -1072,7 +1530,8 @@ def scan_and_upload():
             )
 
             uploaded += 1
-            print(f"  ✅ {uc_id} — {model_name} ({len(content)} chars) — metadata uploaded (fw: {associated_frameworks})")
+            mv_info = f", mv: {mv_assessment_id}" if mv_assessment_id else ""
+            print(f"  ✅ {uc_id} — {model_name} ({len(content)} chars) — metadata uploaded (fw: {associated_frameworks}{mv_info})")
 
         except Exception as e:
             record_id = record.get("id", "unknown")

@@ -88,17 +88,17 @@ def _token_budget_for_query(query: str) -> tuple[int, int]:
 # ───────────────────────────────────────────────────────────────────
 # 1. RETRIEVE ONLY — Get relevant chunks from Bedrock KB
 # ───────────────────────────────────────────────────────────────────
-def retrieve(query: str, top_k: int = 5) -> list[dict]:
+def retrieve(query: str, top_k: int = 100) -> list[dict]:
     """
-    Retrieve relevant chunks from the Knowledge Base.
+    Retrieve ALL relevant chunks from the Knowledge Base.
     Uses HYBRID search (semantic + keyword) for better exact-ID matching.
     Applies STRICT metadata filtering — no cross-contamination.
-    When a framework ID is detected, only docs matching that exact
-    framework_id or having it in framework_ids_associated are returned.
+    Paginates automatically using nextToken so every matching result is
+    returned (Bedrock allows max 100 per page).
     """
     retrieval_config = {
         "vectorSearchConfiguration": {
-            "numberOfResults": top_k,
+            "numberOfResults": min(top_k, 100),   # Bedrock max per page is 100
             "overrideSearchType": "HYBRID"
         }
     }
@@ -125,20 +125,33 @@ def retrieve(query: str, top_k: int = 5) -> list[dict]:
             ]
         }
 
-    response = bedrock_agent.retrieve(
-        knowledgeBaseId=KNOWLEDGE_BASE_ID,
-        retrievalQuery={"text": query},
-        retrievalConfiguration=retrieval_config
-    )
-
+    # ── Paginated retrieval ──
     results = []
-    for item in response.get("retrievalResults", []):
-        results.append({
-            "content": item.get("content", {}).get("text", ""),
-            "score": item.get("score", 0),
-            "source": item.get("location", {}).get("s3Location", {}).get("uri", "N/A")
-        })
+    next_token = None
 
+    while True:
+        call_kwargs = dict(
+            knowledgeBaseId=KNOWLEDGE_BASE_ID,
+            retrievalQuery={"text": query},
+            retrievalConfiguration=retrieval_config
+        )
+        if next_token:
+            call_kwargs["nextToken"] = next_token
+
+        response = bedrock_agent.retrieve(**call_kwargs)
+
+        for item in response.get("retrievalResults", []):
+            results.append({
+                "content": item.get("content", {}).get("text", ""),
+                "score": item.get("score", 0),
+                "source": item.get("location", {}).get("s3Location", {}).get("uri", "N/A")
+            })
+
+        next_token = response.get("nextToken")
+        if not next_token:
+            break                          # no more pages
+
+    print(f"  [retrieve] Fetched {len(results)} chunks from KB")
     return results
 
 
@@ -164,11 +177,11 @@ def summarize_content(content: str, query: str, max_tokens: int = 1500) -> str:
                     "retains ONLY the facts and details relevant to "
                     "answering the question.\n\n"
                     "Rules:\n"
-                    "- NEVER expose raw internal IDs (e.g. AI-ADF-013, AI-CTRL-00001, "
-                    "inventory IDs, Jira issue keys). Instead, refer to items by their "
-                    "descriptive name, title, or purpose. For example, say "
-                    "'the EU AI Act Compliance framework' instead of 'AI-ADF-013'.\n"
-                    "- Keep names, numbers, and dates verbatim.\n"
+                    "- Return ALL data EXACTLY as it appears in the source "
+                    "document — do NOT rephrase, reword, or paraphrase any content.\n"
+                    "- Keep ALL IDs (framework IDs, control IDs, inventory IDs, "
+                    "Jira keys, etc.) exactly as they appear. Do NOT hide or replace them.\n"
+                    "- Keep names, numbers, dates, and field values verbatim.\n"
                     "- When summarising Jira stories, ALWAYS include the associated \n"
                     "  gaps / sub-tasks for each story (gap name and description). \n"
                     "  A story without its gaps is incomplete.\n"
@@ -195,7 +208,7 @@ def summarize_content(content: str, query: str, max_tokens: int = 1500) -> str:
 # ───────────────────────────────────────────────────────────────────
 # 2b. RETRIEVE + OPENAI GENERATE — Full RAG pipeline
 # ───────────────────────────────────────────────────────────────────
-def retrieve_and_generate(query: str, top_k: int = 5) -> dict:
+def retrieve_and_generate(query: str, top_k: int = 100) -> dict:
     """
     Full RAG pipeline: retrieve chunks from Bedrock KB → generate answer via OpenAI.
     Strict metadata filtering ensures zero cross-contamination.
@@ -212,22 +225,35 @@ def retrieve_and_generate(query: str, top_k: int = 5) -> dict:
             "source_match": False
         }
 
-    # Step 2: Compute query-aware token budgets
+    # Step 2: Filter out low-relevance chunks (score < 0.3)
+    MIN_SCORE = 0.3
+    relevant_chunks = [c for c in chunks if c["score"] >= MIN_SCORE]
+    if not relevant_chunks:
+        relevant_chunks = chunks[:3]   # fallback: keep top 3 even if low scores
+    print(f"  [RAG] Using {len(relevant_chunks)}/{len(chunks)} chunks (score >= {MIN_SCORE})")
+    chunks = relevant_chunks
+
+    # Step 3: Compute query-aware token budgets
     summary_budget, answer_budget = _token_budget_for_query(query)
 
-    # Step 3: Build context — for use-case queries, summarise chunk 1 only
+    # Step 4: Build context — combine chunks, then ONE summarisation call
+    MAX_CONTEXT_CHARS = 120_000   # ~30k tokens — safe for GPT-4o 128k window
+
     if is_usecase_query(query):
-        top_chunk = chunks[0]
-        summarised = summarize_content(
-            top_chunk["content"], query, max_tokens=summary_budget
+        # Merge all chunks into a single document, then summarise once
+        combined = "\n\n---\n\n".join(
+            f"[Source: {chunk['source']}]\n{chunk['content']}" for chunk in chunks
         )
-        context = f"[Source: {top_chunk['source']}]\n{summarised}"
-        # Narrow sources to the single chunk actually used
-        chunks = [top_chunk]
+        # Truncate if extremely large before summarising
+        if len(combined) > MAX_CONTEXT_CHARS:
+            combined = combined[:MAX_CONTEXT_CHARS] + "\n... (truncated)"
+        context = summarize_content(combined, query, max_tokens=summary_budget)
     else:
         context = "\n\n---\n\n".join(
             f"[Source: {chunk['source']}]\n{chunk['content']}" for chunk in chunks
         )
+        if len(context) > MAX_CONTEXT_CHARS:
+            context = context[:MAX_CONTEXT_CHARS] + "\n... (truncated)"
 
     
     print("Context: ",context)
@@ -242,14 +268,14 @@ def retrieve_and_generate(query: str, top_k: int = 5) -> dict:
                     "risk controls, and AI inventory records.\n\n"
                     "Use ONLY the information from the provided context to answer. "
                     "If the context doesn't contain enough information, say so clearly.\n\n"
-                    "CRITICAL FORMATTING RULES (these apply to EVERY answer):\n"
-                    "- NEVER show raw internal IDs such as framework IDs (AI-ADF-013), "
-                    "control IDs (AI-CTRL-00001), inventory IDs, use-case IDs, "
-                    "component IDs, or Jira issue keys.\n"
-                    "- Instead, always refer to items by their human-readable name, "
-                    "title, or description. For example write "
-                    "'the EU AI Act Compliance framework' rather than 'AI-ADF-013', "
-                    "or 'the Bias Detection control' rather than 'AI-CTRL-00042'.\n"
+                    "CRITICAL RULES (these apply to EVERY answer):\n"
+                    "- Return ALL data EXACTLY as it appears in the source documents. "
+                    "Do NOT rephrase, reword, paraphrase, or alter any content.\n"
+                    "- Keep ALL IDs verbatim — framework IDs (e.g. AI-ADF-013), "
+                    "control IDs (e.g. AI-CTRL-00001), inventory IDs, use-case IDs, "
+                    "component IDs, Jira issue keys, etc. Do NOT hide or replace them.\n"
+                    "- Keep field names, values, numbers, and dates exactly as they are "
+                    "in the source data.\n"
                     "- When mentioning Jira stories, ALWAYS include the associated \n"
                     "  gaps / sub-tasks for each story (gap name and description). \n"
                     "  Present each story together with its gaps so the user sees \n"
