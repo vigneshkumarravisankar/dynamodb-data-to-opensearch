@@ -120,10 +120,17 @@ def _load_catalog() -> dict:
 # LLM-BASED QUERY CLASSIFIER
 # ───────────────────────────────────────────────────────────────────
 _VALID_SECTIONS = [
+    # Use case assessment sections
     "01_overview", "02_document_summary", "03_ai_bom", "04_data_bom",
     "05_metrics", "06_jira_stories", "07_risk_and_controls",
     "08_design_document", "09_rollout_and_epics", "10_tco",
     "11_model_validation", "12_framework_kcis",
+    # Framework sections
+    "fw_01_overview", "fw_02_policy_references",
+    # Control sections
+    "ctrl_01_overview", "ctrl_02_maturity_levels", "ctrl_03_framework_associations",
+    # Framework-controls sections
+    "fc_01_framework_summary", "fc_02_attached_controls",
 ]
 
 _SECTION_DESCRIPTIONS = """01_overview: Use case overview — model name, AI category, department, vendor, risk level, status, platform, data labels, inventory
@@ -143,10 +150,15 @@ _SECTION_DESCRIPTIONS = """01_overview: Use case overview — model name, AI cat
 _HEAVY_SECTIONS = {
     "08_design_document", "10_tco", "07_risk_and_controls",
     "11_model_validation", "12_framework_kcis",
+    "fc_02_attached_controls",
+    "ctrl_03_framework_associations",
 }
 _MEDIUM_SECTIONS = {
     "06_jira_stories", "05_metrics", "09_rollout_and_epics",
     "03_ai_bom", "04_data_bom", "02_document_summary",
+    "fw_01_overview", "fw_02_policy_references",
+    "fc_01_framework_summary",
+    "ctrl_01_overview", "ctrl_02_maturity_levels",
 }
 
 
@@ -239,9 +251,25 @@ RULES:
 - sections: List of section name(s) most relevant to the query. If the query is broad
   (e.g. "tell me everything"), include ["01_overview", "02_document_summary", "07_risk_and_controls"].
   Return [] ONLY if you truly cannot determine the topic.
-- When the query asks to LIST individual controls, or mentions "controls attached",
-  "list controls", or "what controls", ALWAYS use 12_framework_kcis (NOT 07_risk_and_controls).
-  07_risk_and_controls is for risk POSTURE summaries only.
+
+SECTION ROUTING RULES:
+- Sections starting with "01_" through "12_" are USE CASE sections — use ONLY when the query
+  targets a specific use case (by name or ID). These require usecase_id.
+- Sections starting with "fw_" are FRAMEWORK-ONLY sections — use when asking about a framework's
+  details, description, owner, policies. Set framework_id and use fw_ sections.
+- Sections starting with "ctrl_" are CONTROL-ONLY sections — use when asking about a specific
+  control's details, maturity levels, or which frameworks it belongs to. Set control_id.
+- Sections starting with "fc_" are FRAMEWORK-CONTROLS sections — use when asking about which
+  controls are attached to a framework (without a use case context). Set framework_id.
+
+SPECIFIC RULES:
+- When asking to LIST controls for a USE CASE → use 12_framework_kcis (requires usecase_id).
+- When asking to LIST controls for a FRAMEWORK (no use case) → use fc_02_attached_controls (requires framework_id).
+- When asking about a FRAMEWORK's overview/details → use fw_01_overview (requires framework_id).
+- When asking about a CONTROL's overview/details → use ctrl_01_overview (requires control_id).
+- When asking about a CONTROL's maturity level → use ctrl_02_maturity_levels (requires control_id).
+- When asking about policy documents/links for a framework → use fw_02_policy_references.
+- 07_risk_and_controls is for risk POSTURE summaries only, NOT individual controls.
 - IMPORTANT: Copy IDs EXACTLY as shown in the catalogs above. Do NOT modify, truncate,
   or change the number of digits in any ID.
 
@@ -337,13 +365,23 @@ def retrieve(query: str, top_k: int = 10, classification: dict | None = None) ->
     }
 
     # ── Build metadata filters from classification ──
-    # Only usecase_id and section are reliable metadata filters.
-    # framework_id and control_id are used to enrich the query text
-    # so embeddings rank matching chunks higher.
+    # Determine the entity type based on section prefixes.
+    # fw_* / fc_* sections → filter by framework_id
+    # ctrl_* sections → filter by control_id
+    # 01_-12_ sections → filter by usecase_id
     filters = []
 
-    if uc_id:
+    has_fw_sections = any(s.startswith(("fw_", "fc_")) for s in sections)
+    has_ctrl_sections = any(s.startswith("ctrl_") for s in sections)
+    has_uc_sections = any(not s.startswith(("fw_", "fc_", "ctrl_")) for s in sections)
+
+    # Apply entity ID filter based on section type
+    if uc_id and has_uc_sections:
         filters.append({"equals": {"key": "usecase_id", "value": uc_id}})
+    if fw_id and has_fw_sections:
+        filters.append({"equals": {"key": "framework_id", "value": fw_id}})
+    if ctrl_id and has_ctrl_sections:
+        filters.append({"equals": {"key": "control_id", "value": ctrl_id}})
 
     if sections:
         if len(sections) == 1:
@@ -364,9 +402,9 @@ def retrieve(query: str, top_k: int = 10, classification: dict | None = None) ->
     # ── Enrich query with entity IDs for better semantic matching ──
     enriched_query = query
     hints = []
-    if fw_id:
+    if fw_id and not has_fw_sections:
         hints.append(f"framework {fw_id}")
-    if ctrl_id:
+    if ctrl_id and not has_ctrl_sections:
         hints.append(f"control {ctrl_id}")
     if hints:
         enriched_query = f"{query} ({', '.join(hints)})"
