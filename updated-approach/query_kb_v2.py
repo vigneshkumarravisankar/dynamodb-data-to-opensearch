@@ -119,43 +119,58 @@ def _load_catalog() -> dict:
 # ───────────────────────────────────────────────────────────────────
 # LLM-BASED QUERY CLASSIFIER
 # ───────────────────────────────────────────────────────────────────
-_VALID_SECTIONS = [
-    # Use case assessment sections
-    "01_overview", "02_document_summary", "03_ai_bom", "04_data_bom",
-    "05_metrics", "06_jira_stories", "07_risk_and_controls",
-    "08_design_document", "09_rollout_and_epics", "10_tco",
-    "11_model_validation", "12_framework_kcis",
-    # Framework sections
-    "fw_01_overview", "fw_02_policy_references",
-    # Control sections
-    "ctrl_01_overview", "ctrl_02_maturity_levels", "ctrl_03_framework_associations",
-    # Framework-controls sections
-    "fc_01_framework_summary", "fc_02_attached_controls",
-]
 
+# Section descriptions are the SINGLE SOURCE OF TRUTH.
+# _VALID_SECTIONS is auto-derived from these descriptions, so adding
+# a new section only requires updating _SECTION_DESCRIPTIONS.
 _SECTION_DESCRIPTIONS = """01_overview: Use case overview — model name, AI category, department, vendor, risk level, status, platform, data labels, inventory
 02_document_summary: Document summary and highlights
 03_ai_bom: AI Bill of Materials — LLM provider, AI frameworks, hardware, hosting, PII, AI platform
 04_data_bom: Data Bill of Materials — datasets, data validation
-05_metrics: KPIs, performance metrics, thresholds
+05_metrics: KPIs, performance metrics, thresholds (from the use case assessment definition)
 06_jira_stories: Jira stories, epics, gaps, acceptance criteria, assessment results, missing/valid components
 07_risk_and_controls: Risk POSTURE summary — risk categories, severity breakdown, control coverage percentages, risk applicability (NOT individual control details)
 08_design_document: Architecture, API design, cloud architecture, security compliance, data model, delivery plan, frontend, third party integrations
 09_rollout_and_epics: Rollout plan, deployment phases, epic list
 10_tco: Total Cost of Ownership — compute costs, token analysis, FTE, contractors
 11_model_validation: Model validation assessment — KCI grading, remediation, justification, implementation status, not-met counts
-12_framework_kcis: Individual controls and Key Control Indicators — LIST of attached controls, control IDs, control hierarchy, control names, control questions, "controls attached", "list controls""".strip()
+12_framework_kcis: Individual controls and Key Control Indicators — LIST of attached controls, control IDs, control hierarchy, control names, control questions, "controls attached", "list controls"
+13_ai_model_info: AI model info from validation results — model name, version, production status, approval info, approved by, approved date
+14_ai_eval_metrics: AI evaluation metrics from validation results — actual metric scores/values with explanations, fraud detection rate, processing time, accuracy, latency, compliance scores
+15_ai_sbom: AI Software Bill of Materials (SBOM) from validation results — component inventory, vulnerabilities count, licenses, severity levels, package versions
+16_ai_cspm: AI Cloud Security Posture Management (CSPM) from validation results — overall security score, policy compliance status, security policy issues
+17_ai_security_threats: AI security threats from validation results — prompt injection attempts, tool abuse, threat detection, blocked attempts, risk levels, adversarial attacks
+18_ai_chart_data: AI monitoring chart/trend data from validation results — metrics over time, historical trends, threat detection charts
+19_ai_agent_evaluators: AI agent evaluators from validation results — evaluator definitions, signals, judging methods, evaluation criteria
+20_monitoring_day: Day-wise AI monitoring results — daily run info, run_id, job_id, input dataset, model info, monitoring window, daily metric values, drift analysis, data quality, alerts, monitoring status
+fw_01_overview: Framework overview — framework name, description, owner, category
+fw_02_policy_references: Framework policy references — policy documents, links, regulatory references
+ctrl_01_overview: Control overview — control name, description, hierarchy, classification
+ctrl_02_maturity_levels: Control maturity levels — level definitions, criteria
+ctrl_03_framework_associations: Control framework associations — which frameworks a control belongs to
+fc_01_framework_summary: Framework-controls summary — framework with attached control count
+fc_02_attached_controls: Framework-controls list — all controls attached to a framework""".strip()
+
+# Auto-derive _VALID_SECTIONS from _SECTION_DESCRIPTIONS (single source of truth)
+_VALID_SECTIONS = [
+    line.split(":")[0].strip()
+    for line in _SECTION_DESCRIPTIONS.splitlines()
+    if ":" in line
+]
 
 # Sections that warrant a high token budget
 _HEAVY_SECTIONS = {
     "08_design_document", "10_tco", "07_risk_and_controls",
     "11_model_validation", "12_framework_kcis",
+    "15_ai_sbom", "17_ai_security_threats", "20_monitoring_day",
     "fc_02_attached_controls",
     "ctrl_03_framework_associations",
 }
 _MEDIUM_SECTIONS = {
     "06_jira_stories", "05_metrics", "09_rollout_and_epics",
     "03_ai_bom", "04_data_bom", "02_document_summary",
+    "13_ai_model_info", "14_ai_eval_metrics", "16_ai_cspm",
+    "18_ai_chart_data", "19_ai_agent_evaluators",
     "fw_01_overview", "fw_02_policy_references",
     "fc_01_framework_summary",
     "ctrl_01_overview", "ctrl_02_maturity_levels",
@@ -270,6 +285,22 @@ SPECIFIC RULES:
 - When asking about a CONTROL's maturity level → use ctrl_02_maturity_levels (requires control_id).
 - When asking about policy documents/links for a framework → use fw_02_policy_references.
 - 07_risk_and_controls is for risk POSTURE summaries only, NOT individual controls.
+
+AI EVAL & MONITORING ROUTING (sections 13-20):
+- When asking about AI evaluation scores, metric values, fraud rate, accuracy scores → use 14_ai_eval_metrics (NOT 05_metrics).
+  05_metrics is for metric DEFINITIONS/thresholds; 14_ai_eval_metrics has actual MEASURED values.
+- When asking about SBOM, software components, vulnerabilities, CVEs, packages → use 15_ai_sbom (NOT 03_ai_bom).
+  03_ai_bom is the AI architecture BOM; 15_ai_sbom is the software vulnerability/package analysis.
+- When asking about CSPM, cloud security posture, security score, policy compliance → use 16_ai_cspm.
+- When asking about security threats, prompt injection, tool abuse, adversarial attacks → use 17_ai_security_threats (NOT 07_risk_and_controls).
+- When asking about metric trends, charts, historical data → use 18_ai_chart_data.
+- When asking about evaluators, evaluation criteria, judging methods → use 19_ai_agent_evaluators.
+- When asking about model monitoring, daily monitoring, drift, data quality, monitoring alerts, monitoring status → use 20_monitoring_day.
+- When asking about model info, version, approval from validation → use 13_ai_model_info.
+- When the user asks broadly about "AI evaluation", "validation results", or "monitoring" for a use case,
+  include multiple sections: [14_ai_eval_metrics, 15_ai_sbom, 16_ai_cspm, 17_ai_security_threats, 19_ai_agent_evaluators].
+- When the user asks about "drift" or "data quality" → ALWAYS use 20_monitoring_day (NOT 11_model_validation).
+
 - IMPORTANT: Copy IDs EXACTLY as shown in the catalogs above. Do NOT modify, truncate,
   or change the number of digits in any ID.
 
@@ -303,7 +334,12 @@ User query: {query}"""
     raw_sections = result.get("sections")
     if not isinstance(raw_sections, list):
         raw_sections = []
-    result["sections"] = [s for s in raw_sections if s in _VALID_SECTIONS]
+    # 20_monitoring_day is a prefix — allow it through even though
+    # actual section names are 20_monitoring_day_1, day_2, etc.
+    result["sections"] = [
+        s for s in raw_sections
+        if s in _VALID_SECTIONS or s.startswith("20_monitoring_day")
+    ]
 
     # Validate entity IDs against catalog (fix truncated zeros, etc.)
     _validate_ids(result, catalog)
@@ -328,7 +364,8 @@ User query: {query}"""
 def _token_budget(sections: list[str] | None = None) -> int:
     """Determine max_tokens for the LLM answer based on classified sections."""
     if sections:
-        if any(s in _HEAVY_SECTIONS for s in sections):
+        if (any(s in _HEAVY_SECTIONS for s in sections)
+                or any(s.startswith("20_monitoring_day") for s in sections)):
             return 8000
         if any(s in _MEDIUM_SECTIONS for s in sections):
             return 4000
@@ -355,6 +392,8 @@ def retrieve(query: str, top_k: int = 10, classification: dict | None = None) ->
 
     # Auto-increase top_k for heavy sections
     if any(s in ["12_framework_kcis", "11_model_validation"] for s in sections):
+        top_k = max(top_k, 50)
+    if any(s.startswith("20_monitoring_day") for s in sections):
         top_k = max(top_k, 50)
 
     retrieval_config = {
@@ -384,14 +423,21 @@ def retrieve(query: str, top_k: int = 10, classification: dict | None = None) ->
         filters.append({"equals": {"key": "control_id", "value": ctrl_id}})
 
     if sections:
-        if len(sections) == 1:
-            filters.append({"equals": {"key": "section", "value": sections[0]}})
+        section_filters = []
+        for s in sections:
+            if s.startswith("20_monitoring_day"):
+                # Prefix match: 20_monitoring_day → matches day_1, day_2, etc.
+                section_filters.append(
+                    {"startsWith": {"key": "section", "value": "20_monitoring_day"}}
+                )
+            else:
+                section_filters.append(
+                    {"equals": {"key": "section", "value": s}}
+                )
+        if len(section_filters) == 1:
+            filters.append(section_filters[0])
         else:
-            filters.append({
-                "orAll": [
-                    {"equals": {"key": "section", "value": s}} for s in sections
-                ]
-            })
+            filters.append({"orAll": section_filters})
 
     # Combine
     if len(filters) == 1:

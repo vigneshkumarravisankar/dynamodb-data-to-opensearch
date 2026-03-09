@@ -16,7 +16,17 @@ split into individual section files stored under:
       ├── 09_rollout_and_epics.md        + .metadata.json
       ├── 10_tco.md                      + .metadata.json
       ├── 11_model_validation.md         + .metadata.json
-      └── 12_framework_kcis.md           + .metadata.json
+      ├── 12_framework_kcis.md           + .metadata.json
+      ├── 13_ai_model_info.md            + .metadata.json   (from validation-results)
+      ├── 14_ai_eval_metrics.md          + .metadata.json   (from validation-results)
+      ├── 15_ai_sbom.md                  + .metadata.json   (from validation-results)
+      ├── 16_ai_cspm.md                  + .metadata.json   (from validation-results)
+      ├── 17_ai_security_threats.md       + .metadata.json   (from validation-results)
+      ├── 18_ai_chart_data.md            + .metadata.json   (from validation-results)
+      ├── 19_ai_agent_evaluators.md      + .metadata.json   (from validation-results)
+      ├── 20_monitoring_day_1.md          + .metadata.json   (from monitoring-results/day1.json)
+      ├── 20_monitoring_day_2.md          + .metadata.json   (from monitoring-results/day2.json)
+      └── 20_monitoring_day_N.md          + .metadata.json   (from monitoring-results/dayN.json)
 
 Each section has its own .metadata.json with:
   - usecase_id, model_name, section, doc_type, etc.
@@ -29,6 +39,7 @@ Benefits:
 """
 
 import os
+import re
 import sys
 import json
 import boto3
@@ -67,6 +78,10 @@ S3_PREFIX = "usecase-assessments-v2"
 KNOWLEDGE_BASE_ID = os.getenv("KNOWLEDGE_BASE_ID_V2", "")
 DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID_V2", "")
 
+VALIDATION_RESULTS_BUCKET = os.getenv(
+    "VALIDATION_RESULTS_BUCKET", "fusefy-staging-fa39bf"
+)
+
 USECASE_TABLE = os.getenv(
     "DYNAMODB_USECASE_ASSESSMENTS_TENANT_TABLE",
     "staging-fusefy-usecaseAssessments-d66cb7c7-04ac-4634-927f-06d91afa39bf"
@@ -86,6 +101,389 @@ dynamodb = boto3.client("dynamodb", region_name=REGION)
 s3 = boto3.client("s3", region_name=REGION)
 bedrock_agent = boto3.client("bedrock-agent", region_name=REGION)
 deserializer = TypeDeserializer()
+
+
+# ───────────────────────────────────────────────────────────────────
+# FETCH VALIDATION RESULTS FROM S3
+# ───────────────────────────────────────────────────────────────────
+def fetch_validation_results(usecase_id: str) -> dict | None:
+    """Fetch the latest validation-results JSON for a use case from S3.
+
+    Path pattern: s3://{VALIDATION_RESULTS_BUCKET}/{usecaseId}/validation-results/*.json
+    Returns the parsed JSON dict, or None if not found.
+    """
+    prefix = f"{usecase_id}/validation-results/"
+    try:
+        resp = s3.list_objects_v2(
+            Bucket=VALIDATION_RESULTS_BUCKET, Prefix=prefix
+        )
+        contents = resp.get("Contents", [])
+        # Exclude day*.json monitoring files — those are handled separately
+        json_files = [
+            obj for obj in contents
+            if obj["Key"].endswith(".json")
+            and not obj["Key"].rsplit("/", 1)[-1].startswith("day")
+        ]
+        if not json_files:
+            print(f"    ℹ No validation-results found for {usecase_id}")
+            return None
+
+        # Pick the most recently modified file
+        latest = max(json_files, key=lambda o: o["LastModified"])
+        print(f"    📥 Fetching validation-results: {latest['Key']}")
+
+        obj = s3.get_object(Bucket=VALIDATION_RESULTS_BUCKET, Key=latest["Key"])
+        data = json.loads(obj["Body"].read().decode("utf-8"))
+        return data
+    except Exception as e:
+        print(f"    ⚠️  Could not fetch validation-results for {usecase_id}: {e}")
+        return None
+
+
+# ───────────────────────────────────────────────────────────────────
+# FETCH MONITORING RESULTS (day*.json) FROM S3
+# ───────────────────────────────────────────────────────────────────
+def fetch_monitoring_results(usecase_id: str) -> list[tuple[str, dict]]:
+    """Fetch all day-wise monitoring JSON files for a use case from S3.
+
+    Path pattern: s3://{VALIDATION_RESULTS_BUCKET}/{usecaseId}/monitoring-results/day{i}.json
+    Returns a sorted list of (day_label, parsed_dict) tuples.
+    """
+    prefix = f"{usecase_id}/monitoring-results/"
+    try:
+        results = []
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=VALIDATION_RESULTS_BUCKET, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                filename = key.rsplit("/", 1)[-1]
+                # Match day*.json files (day1.json, day2.json, day_1.json, etc.)
+                if filename.startswith("day") and filename.endswith(".json") and filename != "day.json":
+                    try:
+                        resp = s3.get_object(Bucket=VALIDATION_RESULTS_BUCKET, Key=key)
+                        data = json.loads(resp["Body"].read().decode("utf-8"))
+                        # Normalise to day_N: "day1" → "day_1", "day_1" stays "day_1"
+                        raw_label = filename.replace(".json", "")
+                        if "_" not in raw_label:          # day1 → day_1
+                            day_label = re.sub(r"^day(\d+)$", r"day_\1", raw_label)
+                        else:
+                            day_label = raw_label          # already day_1
+                        results.append((day_label, data))
+                    except Exception as e:
+                        print(f"    ⚠️  Failed to read {key}: {e}")
+
+        # Sort by day number (day_1, day_2, ... day_10, ...)
+        def _day_sort_key(item):
+            try:
+                return int(item[0].split("_", 1)[1])
+            except (ValueError, IndexError):
+                return 999999
+
+        results.sort(key=_day_sort_key)
+
+        if results:
+            print(f"    📥 Found {len(results)} monitoring day files for {usecase_id}")
+        else:
+            print(f"    ℹ No monitoring day files found for {usecase_id}")
+        return results
+
+    except Exception as e:
+        print(f"    ⚠️  Could not fetch monitoring results for {usecase_id}: {e}")
+        return []
+
+
+# ───────────────────────────────────────────────────────────────────
+# FLATTEN MONITORING RESULTS (day-wise)
+# ───────────────────────────────────────────────────────────────────
+def flatten_monitoring_day(day_label: str, data: dict) -> list[str]:
+    """Flatten a single day monitoring JSON into markdown sections."""
+    day_num = day_label.replace("day_", "Day ")
+    lines = [f"## AI Monitoring Results — {day_num}\n"]
+
+    # ── Run Info ──
+    lines.append("### Run Information")
+    lines.append(f"- **Run ID:** {data.get('run_id', 'N/A')}")
+    lines.append(f"- **Job ID:** {data.get('job_id', 'N/A')}")
+    lines.append(f"- **Status:** {data.get('status', 'N/A')}")
+    lines.append("")
+
+    # ── Input Dataset ──
+    lines.append("### Input Dataset")
+    lines.append(f"- **Dataset ID:** {data.get('input_dataset', 'N/A')}")
+    lines.append("")
+
+    # ── Model Info ──
+    lines.append("### Model")
+    lines.append(f"- **Model ID:** {data.get('model_id', 'N/A')}")
+    lines.append(f"- **Model Type:** {data.get('model_type', 'N/A')}")
+    lines.append(f"- **Is Baseline:** {data.get('is_baseline', 'N/A')}")
+    lines.append("")
+
+    # ── Monitoring Window ──
+    mw = data.get("monitoring_window", {})
+    if mw:
+        lines.append("### Monitoring Window")
+        lines.append(f"- **Start Time:** {mw.get('start_time', 'N/A')}")
+        lines.append(f"- **End Time:** {mw.get('end_time', 'N/A')}")
+        lines.append("")
+
+    # ── Metrics ──
+    metrics = data.get("metrics", {})
+    if metrics:
+        lines.append("### Metrics\n")
+        lines.append("| Metric | Value | Explanation |")
+        lines.append("|--------|-------|-------------|")
+        metric_keys = [k for k in metrics if not k.endswith("_explanation")]
+        for key in metric_keys:
+            value = metrics[key]
+            explanation = metrics.get(f"{key}_explanation", "")
+            lines.append(f"| {key} | {value} | {explanation} |")
+        lines.append("")
+
+    # ── Drift ──
+    drift = data.get("drift", {})
+    if drift:
+        lines.append("### Drift Analysis")
+        lines.append(f"- **Has Drift:** {drift.get('has_drift', 'N/A')}")
+        lines.append(f"- **Drift Magnitude:** {drift.get('drift_magnitude', 'N/A')}")
+        lines.append(f"- **Threshold:** {drift.get('threshold', 'N/A')}")
+        lines.append(f"- **Drift Share:** {drift.get('drift_share', 'N/A')}")
+        drifted = drift.get("drifted_features", [])
+        if drifted:
+            lines.append("- **Drifted Features:**")
+            for f in drifted:
+                lines.append(f"  - {f}")
+        else:
+            lines.append("- **Drifted Features:** None")
+        lines.append("")
+
+    # ── Data Quality ──
+    dq = data.get("data_quality", {})
+    if dq:
+        lines.append("### Data Quality")
+        lines.append(f"- **Missing Values:** {dq.get('missing_values', 'N/A')}")
+        constant_cols = dq.get("constant_columns", [])
+        if constant_cols:
+            lines.append(f"- **Constant Columns:** {', '.join(str(c) for c in constant_cols)}")
+        else:
+            lines.append("- **Constant Columns:** None")
+        lines.append("")
+
+    # ── Alerts ──
+    alerts = data.get("alerts", [])
+    if alerts:
+        lines.append("### Alerts\n")
+        lines.append("| Type | Severity | Message |")
+        lines.append("|------|----------|---------|")
+        for alert in alerts:
+            lines.append(
+                f"| {alert.get('type', '')} "
+                f"| {alert.get('severity', '')} "
+                f"| {alert.get('message', '')} |"
+            )
+        lines.append("")
+
+    return lines
+
+
+# ───────────────────────────────────────────────────────────────────
+# FLATTEN VALIDATION-RESULTS SECTIONS
+# ───────────────────────────────────────────────────────────────────
+def flatten_vr_model_info(vr: dict) -> list[str]:
+    """Flatten modelInfo from validation results."""
+    mi = vr.get("modelInfo")
+    if not mi:
+        return []
+    lines = ["## AI Model Information (Validation Results)\n"]
+    lines.append(f"**Model Name:** {mi.get('name', 'N/A')}")
+    lines.append(f"**Version:** {mi.get('version', 'N/A')}")
+    lines.append(f"**Status:** {mi.get('status', 'N/A')}")
+    lines.append(f"**Last Updated:** {mi.get('lastUpdated', 'N/A')}")
+    lines.append(f"**Approved By:** {mi.get('approvedBy', 'N/A')}")
+    lines.append(f"**Approved Date:** {mi.get('approvedDate', 'N/A')}")
+    return lines
+
+
+def flatten_vr_metrics(vr: dict) -> list[str]:
+    """Flatten metrics from validation results."""
+    metrics = vr.get("metrics")
+    if not metrics:
+        return []
+    lines = ["## AI Evaluation Metrics (Validation Results)\n"]
+    lines.append("| Metric | Value | Explanation |")
+    lines.append("|--------|-------|-------------|")
+
+    # Separate metric values from explanations
+    metric_keys = [k for k in metrics if not k.endswith("_explanation")]
+    for key in metric_keys:
+        value = metrics[key]
+        explanation = metrics.get(f"{key}_explanation", "")
+        lines.append(f"| {key} | {value} | {explanation} |")
+    return lines
+
+
+def flatten_vr_sbom(vr: dict) -> list[str]:
+    """Flatten SBOM (Software Bill of Materials) from validation results."""
+    sbom = vr.get("sbom")
+    if not sbom:
+        return []
+    lines = ["## AI Software Bill of Materials — SBOM (Validation Results)\n"]
+    lines.append(f"**Total Components:** {sbom.get('totalComponents', 'N/A')}")
+    lines.append(f"**Critical Vulnerabilities:** {sbom.get('criticalVulnerabilities', 0)}")
+    lines.append(f"**High Vulnerabilities:** {sbom.get('highVulnerabilities', 0)}")
+    lines.append(f"**Medium Vulnerabilities:** {sbom.get('mediumVulnerabilities', 0)}")
+    lines.append(f"**Low Vulnerabilities:** {sbom.get('lowVulnerabilities', 0)}")
+    lines.append("")
+
+    components = sbom.get("components", [])
+    if components:
+        lines.append("### Components\n")
+        lines.append("| Name | Version | License | Vulnerabilities | Severity | Type |")
+        lines.append("|------|---------|---------|-----------------|----------|------|")
+        for comp in components:
+            lines.append(
+                f"| {comp.get('name', '')} "
+                f"| {comp.get('version', '')} "
+                f"| {comp.get('license', '')} "
+                f"| {comp.get('vulnerabilities', 0)} "
+                f"| {comp.get('severity', 'none')} "
+                f"| {comp.get('type', '')} |"
+            )
+    return lines
+
+
+def flatten_vr_cspm(vr: dict) -> list[str]:
+    """Flatten CSPM (Cloud Security Posture Management) from validation results."""
+    cspm = vr.get("cspm")
+    if not cspm:
+        return []
+    lines = ["## AI Cloud Security Posture — CSPM (Validation Results)\n"]
+    lines.append(f"**Overall Security Score:** {cspm.get('overallScore', 'N/A')}")
+    lines.append("")
+
+    policies = cspm.get("policies", [])
+    if policies:
+        lines.append("### Security Policies\n")
+        lines.append("| Policy | Status | Score | Issues |")
+        lines.append("|--------|--------|-------|--------|")
+        for p in policies:
+            lines.append(
+                f"| {p.get('name', '')} "
+                f"| {p.get('status', '')} "
+                f"| {p.get('score', '')} "
+                f"| {p.get('issues', 0)} |"
+            )
+    return lines
+
+
+def flatten_vr_security_threats(vr: dict) -> list[str]:
+    """Flatten securityThreats from validation results."""
+    st = vr.get("securityThreats")
+    if not st:
+        return []
+    lines = ["## AI Security Threats (Validation Results)\n"]
+
+    # Prompt Injection
+    pi = st.get("promptInjection", {})
+    if pi:
+        lines.append("### Prompt Injection")
+        lines.append(f"- **Risk Level:** {pi.get('riskLevel', 'N/A')}")
+        lines.append(f"- **Detected Attempts:** {pi.get('detectedAttempts', 0)}")
+        lines.append(f"- **Blocked Attempts:** {pi.get('blockedAttempts', 0)}")
+        lines.append(f"- **Success Rate:** {pi.get('successRate', 0)}%")
+        patterns = pi.get("commonPatterns", [])
+        if patterns:
+            lines.append("- **Common Patterns:**")
+            for p in patterns:
+                lines.append(f"  - {p}")
+        lines.append("")
+
+    # Tool Abuse
+    ta = st.get("toolAbuse", {})
+    if ta:
+        lines.append("### Tool Abuse")
+        lines.append(f"- **Risk Level:** {ta.get('riskLevel', 'N/A')}")
+        lines.append(f"- **Detected Attempts:** {ta.get('detectedAttempts', 0)}")
+        lines.append(f"- **Blocked Attempts:** {ta.get('blockedAttempts', 0)}")
+        lines.append(f"- **Success Rate:** {ta.get('successRate', 0)}%")
+        patterns = ta.get("commonPatterns", [])
+        if patterns:
+            lines.append("- **Common Patterns:**")
+            for p in patterns:
+                lines.append(f"  - {p}")
+        lines.append("")
+
+    # Threat Detection Summary
+    td = st.get("threatDetection", [])
+    if td:
+        lines.append("### Threat Detection Summary\n")
+        lines.append("| Threat Type | Detected | Blocked |")
+        lines.append("|-------------|----------|---------|")
+        for t in td:
+            lines.append(
+                f"| {t.get('type', '')} "
+                f"| {t.get('detected', 0)} "
+                f"| {t.get('blocked', 0)} |"
+            )
+    return lines
+
+
+def flatten_vr_chart_data(vr: dict) -> list[str]:
+    """Flatten chartData from validation results."""
+    cd = vr.get("chartData")
+    if not cd:
+        return []
+    lines = ["## AI Monitoring Chart Data (Validation Results)\n"]
+
+    # Metrics over time
+    mot = cd.get("metricsOverTime", [])
+    if mot:
+        lines.append("### Metrics Over Time\n")
+        if mot:
+            # Get all metric keys (excluding 'date')
+            metric_keys = [k for k in mot[0].keys() if k != "date"]
+            header = "| Date | " + " | ".join(metric_keys) + " |"
+            separator = "|------| " + " | ".join(["---"] * len(metric_keys)) + " |"
+            lines.append(header)
+            lines.append(separator)
+            for entry in mot:
+                row = f"| {entry.get('date', '')} | "
+                row += " | ".join(str(entry.get(k, "")) for k in metric_keys)
+                row += " |"
+                lines.append(row)
+        lines.append("")
+
+    # Threat detection chart data
+    td = cd.get("threatDetection", [])
+    if td:
+        lines.append("### Threat Detection Chart Data\n")
+        lines.append("| Threat Type | Detected | Blocked |")
+        lines.append("|-------------|----------|---------|")
+        for t in td:
+            lines.append(
+                f"| {t.get('type', '')} "
+                f"| {t.get('detected', 0)} "
+                f"| {t.get('blocked', 0)} |"
+            )
+    return lines
+
+
+def flatten_vr_agent_evaluators(vr: dict) -> list[str]:
+    """Flatten agentEvaluators from validation results."""
+    evals = vr.get("agentEvaluators", [])
+    if not evals:
+        return []
+    lines = ["## AI Agent Evaluators (Validation Results)\n"]
+    lines.append("| Evaluator | Signal | Definition | Judging Method |")
+    lines.append("|-----------|--------|------------|----------------|")
+    for ev in evals:
+        lines.append(
+            f"| {ev.get('name', '')} "
+            f"| {ev.get('signal', '')} "
+            f"| {ev.get('definition', '')} "
+            f"| {ev.get('judging_method', '')} |"
+        )
+    return lines
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -204,6 +602,72 @@ def upload_usecase_sections(
 
         except Exception as e:
             print(f"    ✗ {section_name} failed: {e}")
+
+    # ── Validation Results sections (from S3 — AI Eval & Monitoring) ──
+    validation_data = fetch_validation_results(uc_id)
+    if validation_data:
+        VR_SECTION_DEFS = [
+            ("13_ai_model_info",        flatten_vr_model_info),
+            ("14_ai_eval_metrics",      flatten_vr_metrics),
+            ("15_ai_sbom",              flatten_vr_sbom),
+            ("16_ai_cspm",              flatten_vr_cspm),
+            ("17_ai_security_threats",   flatten_vr_security_threats),
+            ("18_ai_chart_data",        flatten_vr_chart_data),
+            ("19_ai_agent_evaluators",  flatten_vr_agent_evaluators),
+        ]
+        for section_name, flatten_fn in VR_SECTION_DEFS:
+            try:
+                vr_lines = flatten_fn(validation_data)
+                if not vr_lines:
+                    continue
+                content = "\n".join(vr_lines) if isinstance(vr_lines, list) else str(vr_lines)
+                if not content.strip():
+                    continue
+                content = uc_header + content
+                metadata = build_section_metadata(
+                    record, section_name,
+                    extra={"data_source": "validation-results"},
+                )
+                upload_section(S3_BUCKET, folder, section_name, content, metadata)
+                uploaded += 1
+            except Exception as e:
+                print(f"    ✗ {section_name} failed: {e}")
+    else:
+        print(f"    ℹ Skipping validation-results sections (no data) for {uc_id}")
+
+    # ── Monitoring Results — day-wise (from S3) ──
+    monitoring_days = fetch_monitoring_results(uc_id)
+    if monitoring_days:
+        for day_label, day_data in monitoring_days:
+            try:
+                mon_lines = flatten_monitoring_day(day_label, day_data)
+                if not mon_lines:
+                    continue
+                content = "\n".join(mon_lines) if isinstance(mon_lines, list) else str(mon_lines)
+                if not content.strip():
+                    continue
+                content = uc_header + content
+
+                section_name = f"20_monitoring_{day_label}"
+                # Pull monitoring window dates for metadata
+                mw = day_data.get("monitoring_window", {})
+                extra_meta = {
+                    "data_source": "monitoring-results",
+                    "monitoring_day": day_label,
+                    "run_id": day_data.get("run_id", ""),
+                    "model_id": day_data.get("model_id", ""),
+                    "monitoring_start": mw.get("start_time", ""),
+                    "monitoring_end": mw.get("end_time", ""),
+                    "has_drift": str(day_data.get("drift", {}).get("has_drift", "")),
+                    "monitoring_status": day_data.get("status", ""),
+                }
+                metadata = build_section_metadata(record, section_name, extra=extra_meta)
+                upload_section(S3_BUCKET, folder, section_name, content, metadata)
+                uploaded += 1
+            except Exception as e:
+                print(f"    ✗ 20_monitoring_{day_label} failed: {e}")
+    else:
+        print(f"    ℹ Skipping monitoring day sections (no data) for {uc_id}")
 
     # ── Model Validation (needs extra lookups) ──
     try:
