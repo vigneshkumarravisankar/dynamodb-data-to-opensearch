@@ -12,6 +12,7 @@ split into individual section files stored under:
       ├── 05_metrics.md                  + .metadata.json
       ├── 06_jira_stories.md             + .metadata.json
       ├── 07_risk_and_controls.md        + .metadata.json
+      ├── 07b_threat_assessment.md       + .metadata.json
       ├── 08_design_document.md          + .metadata.json
       ├── 09_rollout_and_epics.md        + .metadata.json
       ├── 10_tco.md                      + .metadata.json
@@ -58,6 +59,7 @@ from dynamo_to_s3_usecase_assessments import (
     flatten_metrics,
     flatten_jira_stories,
     flatten_risk_and_controls,
+    flatten_threat_assessment,
     flatten_design_document,
     flatten_rollout_and_epics,
     flatten_tco,
@@ -500,6 +502,7 @@ SECTION_DEFS = [
     ("05_metrics",             flatten_metrics,            None),
     ("06_jira_stories",        flatten_jira_stories,       None),
     ("07_risk_and_controls",   flatten_risk_and_controls,  None),
+    ("07b_threat_assessment",  flatten_threat_assessment,  "threat_assessment"),
     ("08_design_document",     flatten_design_document,    None),
     ("09_rollout_and_epics",   flatten_rollout_and_epics,  None),
     ("10_tco",                 flatten_tco,                None),
@@ -596,7 +599,27 @@ def upload_usecase_sections(
 
             content = uc_header + content
 
-            metadata = build_section_metadata(record, section_name)
+            # Build extra metadata for threat assessment section
+            extra_meta = None
+            if extra_arg == "threat_assessment":
+                ta = record.get("threatAssessment", {})
+                if ta and isinstance(ta, dict):
+                    ta_summary = ta.get("summary", {})
+                    sb = ta_summary.get("statusBreakdown", {}) if isinstance(ta_summary, dict) else {}
+                    rp = ta.get("riskPosture", {})
+                    extra_meta = {
+                        "threat_framework_name": ta.get("frameworkName", ""),
+                        "threat_risk_level": rp.get("riskLevel", "") if isinstance(rp, dict) else "",
+                        "threat_total_applicable_controls": int(ta_summary.get("totalApplicableControls", 0)) if isinstance(ta_summary, dict) else 0,
+                        "threat_total_framework_controls": int(ta_summary.get("totalFrameworkControls", 0)) if isinstance(ta_summary, dict) else 0,
+                        "threat_status_met": int(sb.get("Met", 0)),
+                        "threat_status_implemented": int(sb.get("Implemented", 0)),
+                        "threat_status_not_met": int(sb.get("Not Met", 0)),
+                        "threat_status_risk_accepted": int(sb.get("Risk Accepted", 0)),
+                        "threat_status_not_applicable": int(sb.get("Not Applicable", 0)),
+                    }
+
+            metadata = build_section_metadata(record, section_name, extra=extra_meta)
             upload_section(S3_BUCKET, folder, section_name, content, metadata)
             uploaded += 1
 

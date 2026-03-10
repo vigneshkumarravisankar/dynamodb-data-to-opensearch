@@ -130,6 +130,7 @@ _SECTION_DESCRIPTIONS = """01_overview: Use case overview — model name, AI cat
 05_metrics: KPIs, performance metrics, thresholds (from the use case assessment definition)
 06_jira_stories: Jira stories, epics, gaps, acceptance criteria, assessment results, missing/valid components
 07_risk_and_controls: Risk POSTURE summary — risk categories, severity breakdown, control coverage percentages, risk applicability (NOT individual control details)
+07b_threat_assessment: Threat assessment — threat controls status (Met, Implemented, Risk Accepted, Not Met, Not Applicable), evidence attachments (comments, uploaded documents) for addressed controls, Jira stories for pending controls, risk posture, risk level, framework name, identified threats, mapped components, remediation
 08_design_document: Architecture, API design, cloud architecture, security compliance, data model, delivery plan, frontend, third party integrations
 09_rollout_and_epics: Rollout plan, deployment phases, epic list
 10_tco: Total Cost of Ownership — compute costs, token analysis, FTE, contractors
@@ -161,6 +162,7 @@ _VALID_SECTIONS = [
 # Sections that warrant a high token budget
 _HEAVY_SECTIONS = {
     "08_design_document", "10_tco", "07_risk_and_controls",
+    "07b_threat_assessment",
     "11_model_validation", "12_framework_kcis",
     "15_ai_sbom", "17_ai_security_threats", "20_monitoring_day",
     "fc_02_attached_controls",
@@ -285,6 +287,7 @@ SPECIFIC RULES:
 - When asking about a CONTROL's maturity level → use ctrl_02_maturity_levels (requires control_id).
 - When asking about policy documents/links for a framework → use fw_02_policy_references.
 - 07_risk_and_controls is for risk POSTURE summaries only, NOT individual controls.
+- 07b_threat_assessment is for threat assessment controls — use when asking about threat control statuses (Met, Implemented, Risk Accepted, Not Met, Not Applicable), evidence attachments, remediation, identified threats, or Jira stories for unmet threat controls. Use 07b_threat_assessment (NOT 07_risk_and_controls) when the query mentions threats, threat assessment, evidence, or control status.
 
 AI EVAL & MONITORING ROUTING (sections 13-20):
 - When asking about AI evaluation scores, metric values, fraud rate, accuracy scores → use 14_ai_eval_metrics (NOT 05_metrics).

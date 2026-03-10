@@ -601,6 +601,188 @@ def flatten_risk_and_controls(record: dict) -> list[str]:
 
 
 # ───────────────────────────────────────────────────────────────────
+# 9b. FLATTEN: Threat Assessment
+# ───────────────────────────────────────────────────────────────────
+def flatten_threat_assessment(record: dict) -> list[str]:
+    """Flatten the threatAssessment field into readable markdown.
+
+    Controls with status Met/Implemented/Risk Accepted include
+    comments and uploaded evidence documents.
+    Controls with status Not Met/Not Applicable only have Jira stories
+    (no comments or uploaded documents).
+    """
+    ta = record.get("threatAssessment")
+    if not ta or not isinstance(ta, dict):
+        return []
+
+    lines = []
+    lines.append("")
+    lines.append("## Threat Assessment")
+    lines.append("")
+
+    # Framework name
+    fw_name = ta.get("frameworkName", "")
+    if fw_name:
+        lines.append(f"**Framework:** {fw_name}")
+        lines.append("")
+
+    # Risk Posture
+    rp = ta.get("riskPosture", {})
+    if rp and isinstance(rp, dict):
+        lines.append("### Risk Posture")
+        lines.append(f"- **Risk Level:** {rp.get('riskLevel', 'N/A')}")
+        if rp.get("riskSummary"):
+            lines.append(f"- **Risk Summary:** {rp['riskSummary']}")
+        themes = rp.get("keyRiskThemes", [])
+        if themes and isinstance(themes, list):
+            lines.append("- **Key Risk Themes:**")
+            for theme in themes:
+                lines.append(f"  - {theme}")
+        lines.append("")
+
+    # Summary
+    summary = ta.get("summary", {})
+    if summary and isinstance(summary, dict):
+        lines.append("### Threat Assessment Summary")
+        lines.append(f"- **Total Framework Controls:** {summary.get('totalFrameworkControls', 'N/A')}")
+        lines.append(f"- **Total Applicable Controls:** {summary.get('totalApplicableControls', 'N/A')}")
+        lines.append(f"- **Total Not Applicable Controls:** {summary.get('totalNotApplicableControls', 'N/A')}")
+
+        sb = summary.get("statusBreakdown", {})
+        if sb and isinstance(sb, dict):
+            lines.append("- **Status Breakdown:**")
+            for status_key, count in sb.items():
+                lines.append(f"  - {status_key}: {count}")
+        lines.append("")
+
+    # Controls
+    controls = ta.get("controls", [])
+    if controls and isinstance(controls, list):
+        # Statuses with evidence attachments (comments + uploaded documents)
+        evidence_statuses = {"met", "implemented", "risk accepted"}
+        # Statuses where only Jira stories exist (no comments/evidence)
+        jira_only_statuses = {"not met", "not applicable"}
+
+        evidence_controls = [c for c in controls if isinstance(c, dict) and c.get("status", "").lower() in evidence_statuses]
+        jira_only = [c for c in controls if isinstance(c, dict) and c.get("status", "").lower() in jira_only_statuses]
+
+        # ── Evidence Attachment Controls ──
+        if evidence_controls:
+            lines.append(f"### Evidence Attachment Controls ({len(evidence_controls)} items)")
+            lines.append("")
+            for ctrl in evidence_controls:
+                ctrl_id = ctrl.get("controlId", "")
+                ctrl_name = ctrl.get("controlName", "Unknown")
+                status = ctrl.get("status", "")
+                lines.append(f"#### {ctrl_id} — {ctrl_name}")
+                lines.append(f"- **Status:** {status}")
+
+                if status.lower() == "risk accepted":
+                    lines.append(f"- **Disposition:** Remediation")
+
+                if ctrl.get("assessmentQuestion"):
+                    lines.append(f"- **Assessment Question:** {ctrl['assessmentQuestion']}")
+                if ctrl.get("relevanceScore") is not None:
+                    lines.append(f"- **Relevance Score:** {ctrl['relevanceScore']}")
+                if ctrl.get("controlHierarchy"):
+                    lines.append(f"- **Control Hierarchy:** {ctrl['controlHierarchy']}")
+                if ctrl.get("aiLifecycleStage"):
+                    lines.append(f"- **AI Lifecycle Stage:** {ctrl['aiLifecycleStage']}")
+
+                deploy = ctrl.get("deploymentStages", [])
+                if deploy and isinstance(deploy, list):
+                    lines.append(f"- **Deployment Stages:** {', '.join(str(s) for s in deploy)}")
+
+                if ctrl.get("riskMitigation"):
+                    lines.append(f"- **Risk Mitigation:** {ctrl['riskMitigation']}")
+
+                # Evidence: Comments
+                comment = ctrl.get("comment", "")
+                if comment:
+                    lines.append(f"- **Evidence Comment:** {comment}")
+
+                # Evidence: Uploaded Documents
+                docs = ctrl.get("uploadedDocuments", [])
+                if docs and isinstance(docs, list):
+                    lines.append(f"- **Evidence Documents:**")
+                    for doc in docs:
+                        lines.append(f"  - {doc}")
+
+                if ctrl.get("jiraId"):
+                    lines.append(f"- **Jira ID:** {ctrl['jiraId']}")
+
+                # Mapped Components & Threats
+                mapped = ctrl.get("mappedComponents", [])
+                if mapped and isinstance(mapped, list):
+                    lines.append(f"- **Mapped Components:**")
+                    for comp in mapped:
+                        if not isinstance(comp, dict):
+                            continue
+                        comp_name = comp.get("componentName", "")
+                        lines.append(f"  - **{comp_name}**")
+                        if comp.get("mappingReason"):
+                            lines.append(f"    - Mapping Reason: {comp['mappingReason']}")
+                        threats = comp.get("identifiedThreats", [])
+                        if threats and isinstance(threats, list):
+                            for threat in threats:
+                                if isinstance(threat, dict):
+                                    lines.append(f"    - Threat: **{threat.get('riskName', '')}** — {threat.get('riskDescription', '')}")
+
+                lines.append("")
+
+        # ── Jira-Only Controls (Not Met / Not Applicable) ──
+        if jira_only:
+            lines.append(f"### Controls Pending / Not Applicable — Jira Stories Only ({len(jira_only)} items)")
+            lines.append("")
+            for ctrl in jira_only:
+                ctrl_id = ctrl.get("controlId", "")
+                ctrl_name = ctrl.get("controlName", "Unknown")
+                status = ctrl.get("status", "")
+                lines.append(f"#### {ctrl_id} — {ctrl_name}")
+                lines.append(f"- **Status:** {status}")
+
+                if ctrl.get("assessmentQuestion"):
+                    lines.append(f"- **Assessment Question:** {ctrl['assessmentQuestion']}")
+                if ctrl.get("relevanceScore") is not None:
+                    lines.append(f"- **Relevance Score:** {ctrl['relevanceScore']}")
+                if ctrl.get("controlHierarchy"):
+                    lines.append(f"- **Control Hierarchy:** {ctrl['controlHierarchy']}")
+                if ctrl.get("aiLifecycleStage"):
+                    lines.append(f"- **AI Lifecycle Stage:** {ctrl['aiLifecycleStage']}")
+
+                deploy = ctrl.get("deploymentStages", [])
+                if deploy and isinstance(deploy, list):
+                    lines.append(f"- **Deployment Stages:** {', '.join(str(s) for s in deploy)}")
+
+                if ctrl.get("riskMitigation"):
+                    lines.append(f"- **Risk Mitigation:** {ctrl['riskMitigation']}")
+
+                if ctrl.get("jiraId"):
+                    lines.append(f"- **Jira ID:** {ctrl['jiraId']}")
+
+                # Mapped Components & Threats
+                mapped = ctrl.get("mappedComponents", [])
+                if mapped and isinstance(mapped, list):
+                    lines.append(f"- **Mapped Components:**")
+                    for comp in mapped:
+                        if not isinstance(comp, dict):
+                            continue
+                        comp_name = comp.get("componentName", "")
+                        lines.append(f"  - **{comp_name}**")
+                        if comp.get("mappingReason"):
+                            lines.append(f"    - Mapping Reason: {comp['mappingReason']}")
+                        threats = comp.get("identifiedThreats", [])
+                        if threats and isinstance(threats, list):
+                            for threat in threats:
+                                if isinstance(threat, dict):
+                                    lines.append(f"    - Threat: **{threat.get('riskName', '')}** — {threat.get('riskDescription', '')}")
+
+                lines.append("")
+
+    return lines
+
+
+# ───────────────────────────────────────────────────────────────────
 # 10. FLATTEN: Design Document
 # ───────────────────────────────────────────────────────────────────
 def flatten_design_document(record: dict) -> list[str]:
