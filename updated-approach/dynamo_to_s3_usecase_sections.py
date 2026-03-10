@@ -13,6 +13,7 @@ split into individual section files stored under:
       ├── 06_jira_stories.md             + .metadata.json
       ├── 07_risk_and_controls.md        + .metadata.json
       ├── 07b_threat_assessment.md       + .metadata.json
+      ├── 07b_jira_{controlId}.md        + .metadata.json   (one per control with a jiraId)
       ├── 08_design_document.md          + .metadata.json
       ├── 09_rollout_and_epics.md        + .metadata.json
       ├── 10_tco.md                      + .metadata.json
@@ -625,6 +626,63 @@ def upload_usecase_sections(
 
         except Exception as e:
             print(f"    ✗ {section_name} failed: {e}")
+
+    # ── Per-control Jira Evidence sections (from threatAssessment) ──
+    try:
+        ta = record.get("threatAssessment", {})
+        controls_list = ta.get("controls", []) if isinstance(ta, dict) else []
+        for ctrl in controls_list:
+            if not isinstance(ctrl, dict):
+                continue
+            jira_id = ctrl.get("jiraId", "")
+            if not jira_id:
+                continue
+
+            ctrl_id = ctrl.get("controlId", "unknown_ctrl")
+            ctrl_name = ctrl.get("controlName", "Unknown Control")
+            status = ctrl.get("status", "")
+
+            ctrl_lines = [f"## Control: {ctrl_id} — {ctrl_name}\n"]
+            ctrl_lines.append(f"- **Status:** {status}")
+            ctrl_lines.append(f"- **Jira ID:** {jira_id}")
+            if ctrl.get("assessmentQuestion"):
+                ctrl_lines.append(f"- **Assessment Question:** {ctrl['assessmentQuestion']}")
+            if ctrl.get("relevanceScore") is not None:
+                ctrl_lines.append(f"- **Relevance Score:** {ctrl['relevanceScore']}")
+            if ctrl.get("controlHierarchy"):
+                ctrl_lines.append(f"- **Control Hierarchy:** {ctrl['controlHierarchy']}")
+            if ctrl.get("aiLifecycleStage"):
+                ctrl_lines.append(f"- **AI Lifecycle Stage:** {ctrl['aiLifecycleStage']}")
+            deploy = ctrl.get("deploymentStages", [])
+            if deploy:
+                ctrl_lines.append(f"- **Deployment Stages:** {', '.join(str(s) for s in deploy)}")
+            if ctrl.get("riskMitigation"):
+                ctrl_lines.append(f"- **Risk Mitigation:** {ctrl['riskMitigation']}")
+            comment = ctrl.get("comment", "")
+            if comment:
+                ctrl_lines.append(f"- **Evidence Comment:** {comment}")
+            docs = ctrl.get("uploadedDocuments", [])
+            if docs:
+                ctrl_lines.append("- **Evidence Documents:**")
+                for doc in docs:
+                    ctrl_lines.append(f"  - {doc}")
+
+            content = uc_header + "\n".join(ctrl_lines)
+            safe_jira_id = re.sub(r"[^\w\-]", "_", jira_id)
+            section_name = f"07b_jira_{safe_jira_id}"
+
+            metadata = {
+                "metadataAttributes": {
+                    "doc_type": "jira-evidence",
+                    "jira_story_key": jira_id,
+                    "usecase_id": uc_id,
+                }
+            }
+            upload_section(S3_BUCKET, folder, section_name, content, metadata)
+            uploaded += 1
+
+    except Exception as e:
+        print(f"    ✗ jira-evidence controls failed: {e}")
 
     # ── Validation Results sections (from S3 — AI Eval & Monitoring) ──
     validation_data = fetch_validation_results(uc_id)
