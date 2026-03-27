@@ -31,6 +31,7 @@ DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID_FC_V2", "")
 FRAMEWORK_CONTROLS_TABLE = os.getenv("DYNAMODB_FRAMEWORK_CONTROLS_TABLE", "staging-fusefy-frameworkControls")
 FRAMEWORKS_TABLE = os.getenv("DYNAMODB_TABLE", "staging-fusefy-frameworks")
 CONTROLS_TABLE = os.getenv("DYNAMODB_CONTROLS_TABLE", "staging-fusefy-controls")
+CLOUD_ID = os.getenv("CLOUD_ID", "")
 
 # ── Clients ─────────────────────────────────────────────────────────
 dynamodb = boto3.client("dynamodb", region_name=REGION)
@@ -77,6 +78,7 @@ def build_section_metadata(framework: dict, section_name: str, control_ids: list
     fw_name = framework.get("name", "Unknown")
     meta = {
         "metadataAttributes": {
+            "cloudId": CLOUD_ID,
             "framework_id": fw_id,
             "framework_name": fw_name,
             "section": section_name,

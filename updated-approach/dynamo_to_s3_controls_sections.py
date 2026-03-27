@@ -1,15 +1,13 @@
 """
-Pipeline: staging-fusefy-controls → S3 (section-based) → Bedrock KB
+Pipeline: staging-fusefy-controls → S3 → Bedrock KB
 
-Each control is split into individual section files:
+Each control produces a single consolidated file:
 
-  s3://{BUCKET}/controls-v2/{controlId}/
-      ├── ctrl_01_overview.md                + .metadata.json
-      ├── ctrl_02_maturity_levels.md         + .metadata.json
-      └── ctrl_03_framework_associations.md  + .metadata.json
+  s3://{BUCKET}/controls-v2/{controlId}.md             (all sections combined)
+  s3://{BUCKET}/controls-v2/{controlId}.md.metadata.json
 
-Each section has its own .metadata.json with:
-  - control_id, control_name, section, doc_type, framework_ids_associated
+Metadata contains:
+  - id, frameworksAssociated, maturityLevel, aiLifecycleStage, trustworthyAiControl
 """
 
 import os
@@ -31,6 +29,7 @@ DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID_CONTROLS_V2", "")
 
 CONTROLS_TABLE = os.getenv("DYNAMODB_CONTROLS_TABLE", "staging-fusefy-controls")
 FRAMEWORKS_TABLE = os.getenv("DYNAMODB_TABLE", "staging-fusefy-frameworks")
+CLOUD_ID = os.getenv("CLOUD_ID", "")
 
 # ── Clients ─────────────────────────────────────────────────────────
 dynamodb = boto3.client("dynamodb", region_name=REGION)
@@ -124,9 +123,8 @@ def scan_table(table_name: str) -> list[dict]:
     return clean
 
 
-def upload_section(bucket: str, folder: str, filename: str, content: str, metadata: dict):
-    s3_key = f"{folder}/{filename}.md"
-    meta_key = f"{folder}/{filename}.md.metadata.json"
+def upload_file(bucket: str, s3_key: str, content: str, metadata: dict):
+    meta_key = f"{s3_key}.metadata.json"
     s3.put_object(Bucket=bucket, Key=s3_key, Body=content.encode("utf-8"), ContentType="text/markdown")
     s3.put_object(Bucket=bucket, Key=meta_key, Body=json.dumps(metadata, indent=2).encode("utf-8"), ContentType="application/json")
     print(f"    ✓ {s3_key} ({len(content)} chars)")
@@ -161,23 +159,28 @@ def get_associated_framework_ids(record: dict) -> list[str]:
 # ───────────────────────────────────────────────────────────────────
 # METADATA BUILDER
 # ───────────────────────────────────────────────────────────────────
-def build_section_metadata(record: dict, section_name: str, extra: dict = None) -> dict:
-    ctrl_id = record.get("id", "unknown")
-    display_name = get_display_name(record)
-    fw_ids = get_associated_framework_ids(record)
+def get_maturity_levels(record: dict) -> list[str]:
+    """Return level keys (e.g. 'Level 2') where the DynamoDB value has a ✓."""
+    levels = []
+    for lvl in range(1, 7):
+        key = f"Level {lvl}"
+        val = record.get(key, "")
+        if val and str(val).strip():
+            levels.append(key)
+    return levels
 
-    meta = {
+
+def build_control_metadata(record: dict) -> dict:
+    return {
         "metadataAttributes": {
-            "control_id": ctrl_id,
-            "control_name": display_name,
-            "section": section_name,
-            "doc_type": "control",
-            "framework_ids_associated": fw_ids,
+            "cloudId": CLOUD_ID,
+            "id": record.get("id", "unknown"),
+            "frameworksAssociated": get_associated_framework_ids(record),
+            "maturityLevel": get_maturity_levels(record),
+            "aiLifecycleStage": record.get("aiLifecycleStage", ""),
+            "trustworthyAiControl": record.get("trustworthyAiControl", ""),
         }
     }
-    if extra:
-        meta["metadataAttributes"].update(extra)
-    return meta
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -334,55 +337,42 @@ def flatten_ctrl_framework_associations(record: dict, framework_lookup: dict) ->
 
 
 # ───────────────────────────────────────────────────────────────────
-# UPLOAD ALL SECTIONS FOR ONE CONTROL
+# UPLOAD SINGLE CONSOLIDATED FILE PER CONTROL
 # ───────────────────────────────────────────────────────────────────
-def upload_control_sections(record: dict, framework_lookup: dict) -> int:
+def upload_control(record: dict, framework_lookup: dict) -> int:
     ctrl_id = record.get("id", "unknown")
     display_name = get_display_name(record)
-    folder = f"{S3_PREFIX}/{ctrl_id}"
-    uploaded = 0
 
-    # Header prepended to every section
-    ctrl_header = (
+    header = (
         f"**Control:** {display_name}\n"
         f"**Control ID:** {ctrl_id}\n\n"
     )
 
-    # Standard sections (no extra args)
-    simple_sections = [
-        ("ctrl_01_overview", flatten_ctrl_overview),
-        ("ctrl_02_maturity_levels", flatten_ctrl_maturity_levels),
-    ]
+    parts: list[str] = []
 
-    for section_name, flatten_fn in simple_sections:
+    # Gather all sections
+    for flatten_fn, args in [
+        (flatten_ctrl_overview, (record,)),
+        (flatten_ctrl_maturity_levels, (record,)),
+        (flatten_ctrl_framework_associations, (record, framework_lookup)),
+    ]:
         try:
-            lines = flatten_fn(record)
-            if not lines:
-                continue
-            content = "\n".join(lines) if isinstance(lines, list) else str(lines)
-            if not content.strip():
-                continue
-            content = ctrl_header + content
-            metadata = build_section_metadata(record, section_name)
-            upload_section(S3_BUCKET, folder, section_name, content, metadata)
-            uploaded += 1
+            lines = flatten_fn(*args)
+            if lines:
+                text = "\n".join(lines) if isinstance(lines, list) else str(lines)
+                if text.strip():
+                    parts.append(text)
         except Exception as e:
-            print(f"    ✗ {section_name} failed: {e}")
+            print(f"    ✗ {flatten_fn.__name__} failed for {ctrl_id}: {e}")
 
-    # Framework associations (needs framework_lookup)
-    try:
-        lines = flatten_ctrl_framework_associations(record, framework_lookup)
-        if lines:
-            content = "\n".join(lines)
-            if content.strip():
-                content = ctrl_header + content
-                metadata = build_section_metadata(record, "ctrl_03_framework_associations")
-                upload_section(S3_BUCKET, folder, "ctrl_03_framework_associations", content, metadata)
-                uploaded += 1
-    except Exception as e:
-        print(f"    ✗ ctrl_03_framework_associations failed: {e}")
+    if not parts:
+        return 0
 
-    return uploaded
+    content = header + "\n\n".join(parts)
+    metadata = build_control_metadata(record)
+    s3_key = f"{S3_PREFIX}/{ctrl_id}.md"
+    upload_file(S3_BUCKET, s3_key, content, metadata)
+    return 1
 
 
 # ───────────────────────────────────────────────────────────────────
@@ -390,7 +380,7 @@ def upload_control_sections(record: dict, framework_lookup: dict) -> int:
 # ───────────────────────────────────────────────────────────────────
 def scan_and_upload():
     print(f"\n{'='*60}")
-    print(f"  Controls — Section-Based Pipeline")
+    print(f"  Controls — Consolidated Pipeline")
     print(f"  Table:  {CONTROLS_TABLE}")
     print(f"  S3:     s3://{S3_BUCKET}/{S3_PREFIX}/")
     print(f"{'='*60}")
@@ -436,20 +426,19 @@ def scan_and_upload():
     else:
         print("  No existing files to delete.")
 
-    # Upload sections
-    print(f"\n📤 Uploading sections to s3://{S3_BUCKET}/{S3_PREFIX}/")
-    total_sections = 0
+    # Upload controls
+    print(f"\n📤 Uploading controls to s3://{S3_BUCKET}/{S3_PREFIX}/")
+    total_uploaded = 0
     for i, record in enumerate(controls, 1):
         try:
-            count = upload_control_sections(record, framework_lookup)
-            total_sections += count
+            total_uploaded += upload_control(record, framework_lookup)
             if i % 100 == 0:
-                print(f"  ... processed {i}/{len(controls)} controls ({total_sections} sections)")
+                print(f"  ... processed {i}/{len(controls)} controls ({total_uploaded} uploaded)")
         except Exception as e:
             print(f"  ❌ Failed: {record.get('id', 'unknown')} — {e}")
 
-    print(f"\n✅ Uploaded {total_sections} total section files for {len(controls)} controls.")
-    return total_sections
+    print(f"\n✅ Uploaded {total_uploaded} control files for {len(controls)} controls.")
+    return total_uploaded
 
 
 def sync_knowledge_base():
@@ -481,7 +470,7 @@ def sync_knowledge_base():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  Controls → S3 (Section-Based) → Bedrock KB")
+    print("  Controls → S3 → Bedrock KB")
     print(f"  Table: {CONTROLS_TABLE}")
     print(f"  S3:    s3://{S3_BUCKET}/{S3_PREFIX}/")
     print("=" * 60)

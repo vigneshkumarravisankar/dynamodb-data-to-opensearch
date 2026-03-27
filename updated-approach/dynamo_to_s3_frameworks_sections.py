@@ -29,6 +29,7 @@ KNOWLEDGE_BASE_ID = os.getenv("KNOWLEDGE_BASE_ID_V2") or os.getenv("KNOWLEDGE_BA
 DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID_FRAMEWORKS_V2", "")
 
 FRAMEWORKS_TABLE = os.getenv("DYNAMODB_TABLE", "staging-fusefy-frameworks")
+CLOUD_ID = os.getenv("CLOUD_ID", "")
 
 # ── Clients ─────────────────────────────────────────────────────────
 dynamodb = boto3.client("dynamodb", region_name=REGION)
@@ -75,6 +76,7 @@ def build_section_metadata(record: dict, section_name: str, extra: dict = None) 
     fw_name = record.get("name", "Unknown")
     meta = {
         "metadataAttributes": {
+            "cloudId": CLOUD_ID,
             "framework_id": fw_id,
             "framework_name": fw_name,
             "section": section_name,

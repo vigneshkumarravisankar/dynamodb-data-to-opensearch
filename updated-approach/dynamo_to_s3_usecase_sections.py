@@ -12,7 +12,7 @@ split into individual section files stored under:
       ├── 05_metrics.md                  + .metadata.json
       ├── 06_jira_stories.md             + .metadata.json
       ├── 07_risk_and_controls.md        + .metadata.json
-      ├── 07b_threat_assessment.md       + .metadata.json
+      ├── 07b_risk_assessment.md         + .metadata.json
       ├── 07b_jira_{controlId}.md        + .metadata.json   (one per control with a jiraId)
       ├── 08_design_document.md          + .metadata.json
       ├── 09_rollout_and_epics.md        + .metadata.json
@@ -23,7 +23,7 @@ split into individual section files stored under:
       ├── 14_ai_eval_metrics.md          + .metadata.json   (from validation-results)
       ├── 15_ai_sbom.md                  + .metadata.json   (from validation-results)
       ├── 16_ai_cspm.md                  + .metadata.json   (from validation-results)
-      ├── 17_ai_security_threats.md       + .metadata.json   (from validation-results)
+      ├── 17_ai_security_risks.md         + .metadata.json   (from validation-results)
       ├── 18_ai_chart_data.md            + .metadata.json   (from validation-results)
       ├── 19_ai_agent_evaluators.md      + .metadata.json   (from validation-results)
       ├── 20_monitoring_day_1.md          + .metadata.json   (from monitoring-results/day1.json)
@@ -98,6 +98,7 @@ MODEL_VALIDATION_TABLE = os.getenv(
     "DYNAMODB_MODEL_VALIDATION_TABLE",
     "staging-fusefy-modelValidation-d66cb7c7-04ac-4634-927f-06d91afa39bf"
 )
+CLOUD_ID = os.getenv("CLOUD_ID", "")
 
 # ── Clients ─────────────────────────────────────────────────────────
 dynamodb = boto3.client("dynamodb", region_name=REGION)
@@ -379,12 +380,12 @@ def flatten_vr_cspm(vr: dict) -> list[str]:
     return lines
 
 
-def flatten_vr_security_threats(vr: dict) -> list[str]:
+def flatten_vr_security_risks(vr: dict) -> list[str]:
     """Flatten securityThreats from validation results."""
     st = vr.get("securityThreats")
     if not st:
         return []
-    lines = ["## AI Security Threats (Validation Results)\n"]
+    lines = ["## AI Security Risks (Validation Results)\n"]
 
     # Prompt Injection
     pi = st.get("promptInjection", {})
@@ -416,11 +417,11 @@ def flatten_vr_security_threats(vr: dict) -> list[str]:
                 lines.append(f"  - {p}")
         lines.append("")
 
-    # Threat Detection Summary
+    # Risk Detection Summary
     td = st.get("threatDetection", [])
     if td:
-        lines.append("### Threat Detection Summary\n")
-        lines.append("| Threat Type | Detected | Blocked |")
+        lines.append("### Risk Detection Summary\n")
+        lines.append("| Risk Type | Detected | Blocked |")
         lines.append("|-------------|----------|---------|")
         for t in td:
             lines.append(
@@ -456,11 +457,11 @@ def flatten_vr_chart_data(vr: dict) -> list[str]:
                 lines.append(row)
         lines.append("")
 
-    # Threat detection chart data
+    # Risk detection chart data
     td = cd.get("threatDetection", [])
     if td:
-        lines.append("### Threat Detection Chart Data\n")
-        lines.append("| Threat Type | Detected | Blocked |")
+        lines.append("### Risk Detection Chart Data\n")
+        lines.append("| Risk Type | Detected | Blocked |")
         lines.append("|-------------|----------|---------|")
         for t in td:
             lines.append(
@@ -503,7 +504,7 @@ SECTION_DEFS = [
     ("05_metrics",             flatten_metrics,            None),
     ("06_jira_stories",        flatten_jira_stories,       None),
     ("07_risk_and_controls",   flatten_risk_and_controls,  None),
-    ("07b_threat_assessment",  flatten_threat_assessment,  "threat_assessment"),
+    ("07b_risk_assessment",    flatten_threat_assessment,  "risk_assessment"),
     ("08_design_document",     flatten_design_document,    None),
     ("09_rollout_and_epics",   flatten_rollout_and_epics,  None),
     ("10_tco",                 flatten_tco,                None),
@@ -522,6 +523,7 @@ def build_section_metadata(record: dict, section_name: str, extra: dict = None) 
 
     meta = {
         "metadataAttributes": {
+            "cloudId": CLOUD_ID,
             "usecase_id": uc_id,
             "section": section_name,
             "model_name": model_name,
@@ -600,24 +602,24 @@ def upload_usecase_sections(
 
             content = uc_header + content
 
-            # Build extra metadata for threat assessment section
+            # Build extra metadata for risk assessment section
             extra_meta = None
-            if extra_arg == "threat_assessment":
+            if extra_arg == "risk_assessment":
                 ta = record.get("threatAssessment", {})
                 if ta and isinstance(ta, dict):
                     ta_summary = ta.get("summary", {})
                     sb = ta_summary.get("statusBreakdown", {}) if isinstance(ta_summary, dict) else {}
                     rp = ta.get("riskPosture", {})
                     extra_meta = {
-                        "threat_framework_name": ta.get("frameworkName", ""),
-                        "threat_risk_level": rp.get("riskLevel", "") if isinstance(rp, dict) else "",
-                        "threat_total_applicable_controls": int(ta_summary.get("totalApplicableControls", 0)) if isinstance(ta_summary, dict) else 0,
-                        "threat_total_framework_controls": int(ta_summary.get("totalFrameworkControls", 0)) if isinstance(ta_summary, dict) else 0,
-                        "threat_status_met": int(sb.get("Met", 0)),
-                        "threat_status_implemented": int(sb.get("Implemented", 0)),
-                        "threat_status_not_met": int(sb.get("Not Met", 0)),
-                        "threat_status_risk_accepted": int(sb.get("Risk Accepted", 0)),
-                        "threat_status_not_applicable": int(sb.get("Not Applicable", 0)),
+                        "risk_framework_name": ta.get("frameworkName", ""),
+                        "risk_level": rp.get("riskLevel", "") if isinstance(rp, dict) else "",
+                        "risk_total_applicable_controls": int(ta_summary.get("totalApplicableControls", 0)) if isinstance(ta_summary, dict) else 0,
+                        "risk_total_framework_controls": int(ta_summary.get("totalFrameworkControls", 0)) if isinstance(ta_summary, dict) else 0,
+                        "risk_status_met": int(sb.get("Met", 0)),
+                        "risk_status_implemented": int(sb.get("Implemented", 0)),
+                        "risk_status_not_met": int(sb.get("Not Met", 0)),
+                        "risk_status_risk_accepted": int(sb.get("Risk Accepted", 0)),
+                        "risk_status_not_applicable": int(sb.get("Not Applicable", 0)),
                     }
 
             metadata = build_section_metadata(record, section_name, extra=extra_meta)
@@ -673,6 +675,7 @@ def upload_usecase_sections(
 
             metadata = {
                 "metadataAttributes": {
+                    "cloudId": CLOUD_ID,
                     "doc_type": "jira-evidence",
                     "jira_story_key": jira_id,
                     "usecase_id": uc_id,
@@ -692,7 +695,7 @@ def upload_usecase_sections(
             ("14_ai_eval_metrics",      flatten_vr_metrics),
             ("15_ai_sbom",              flatten_vr_sbom),
             ("16_ai_cspm",              flatten_vr_cspm),
-            ("17_ai_security_threats",   flatten_vr_security_threats),
+            ("17_ai_security_risks",     flatten_vr_security_risks),
             ("18_ai_chart_data",        flatten_vr_chart_data),
             ("19_ai_agent_evaluators",  flatten_vr_agent_evaluators),
         ]
