@@ -12,7 +12,7 @@ split into individual section files stored under:
       ├── 05_metrics.md                  + .metadata.json
       ├── 06_jira_stories.md             + .metadata.json
       ├── 07_risk_and_controls.md        + .metadata.json
-      ├── 07b_risk_assessment.md         + .metadata.json
+      ├── 07b_threat_assessment.md       + .metadata.json
       ├── 07b_jira_{controlId}.md        + .metadata.json   (one per control with a jiraId)
       ├── 08_design_document.md          + .metadata.json
       ├── 09_rollout_and_epics.md        + .metadata.json
@@ -23,7 +23,7 @@ split into individual section files stored under:
       ├── 14_ai_eval_metrics.md          + .metadata.json   (from validation-results)
       ├── 15_ai_sbom.md                  + .metadata.json   (from validation-results)
       ├── 16_ai_cspm.md                  + .metadata.json   (from validation-results)
-      ├── 17_ai_security_risks.md         + .metadata.json   (from validation-results)
+      ├── 17_ai_security_threats.md       + .metadata.json   (from validation-results)
       ├── 18_ai_chart_data.md            + .metadata.json   (from validation-results)
       ├── 19_ai_agent_evaluators.md      + .metadata.json   (from validation-results)
       ├── 20_monitoring_day_1.md          + .metadata.json   (from monitoring-results/day1.json)
@@ -504,7 +504,7 @@ SECTION_DEFS = [
     ("05_metrics",             flatten_metrics,            None),
     ("06_jira_stories",        flatten_jira_stories,       None),
     ("07_risk_and_controls",   flatten_risk_and_controls,  None),
-    ("07b_risk_assessment",    flatten_threat_assessment,  "risk_assessment"),
+    ("07b_threat_assessment",   flatten_threat_assessment,  "risk_assessment"),
     ("08_design_document",     flatten_design_document,    None),
     ("09_rollout_and_epics",   flatten_rollout_and_epics,  None),
     ("10_tco",                 flatten_tco,                None),
@@ -532,7 +532,7 @@ def build_section_metadata(record: dict, section_name: str, extra: dict = None) 
             "overall_risk": record.get("overallRisk", ""),
             "department": record.get("department", ""),
             "status": record.get("status", ""),
-            "framework_ids_associated": [risk_fw_id] if risk_fw_id else [],
+            "framework_ids_associated": risk_fw_id if risk_fw_id else "",
         }
     }
     if extra:
@@ -695,7 +695,7 @@ def upload_usecase_sections(
             ("14_ai_eval_metrics",      flatten_vr_metrics),
             ("15_ai_sbom",              flatten_vr_sbom),
             ("16_ai_cspm",              flatten_vr_cspm),
-            ("17_ai_security_risks",     flatten_vr_security_risks),
+            ("17_ai_security_threats",    flatten_vr_security_risks),
             ("18_ai_chart_data",        flatten_vr_chart_data),
             ("19_ai_agent_evaluators",  flatten_vr_agent_evaluators),
         ]

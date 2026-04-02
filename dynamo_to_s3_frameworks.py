@@ -1,3 +1,17 @@
+"""
+Pipeline: staging-fusefy-frameworks → S3 (plain text) → Pinecone
+
+Each framework is uploaded as:
+  s3://{BUCKET}/frameworks/{record_id}.txt          (plain text for embedding)
+  s3://{BUCKET}/frameworks/{record_id}.metadata.json (keyword metadata for Pinecone filtering)
+
+Pinecone approach:
+  - First level: keyword-based metadata filtering (framework_id, name, doc_type, categories, regions, etc.)
+  - Second level: vector similarity on plain text content for detail matching
+  - No markdown formatting — Pinecone embeddings work best with clean plain text
+  - Whole field data taken as-is from DynamoDB (no auto-chunking)
+"""
+
 import os
 import json
 import boto3
@@ -29,79 +43,158 @@ def unmarshall(dynamo_item: dict) -> dict:
 
 
 # ───────────────────────────────────────────────────────────────────
-# 2. FLATTEN record into readable Markdown for RAG
+# 2. BUILD PINECONE METADATA — keyword fields for first-level filtering
+# ───────────────────────────────────────────────────────────────────
+def build_pinecone_metadata(record: dict) -> dict:
+    """
+    Build metadata dict for Pinecone filtering.
+    These fields enable keyword-based first-level search before
+    vector similarity is applied on the text content.
+    """
+    record_id = record.get("id", "Unknown")
+    name = record.get("name", "Unknown")
+
+    # Core keyword fields for first-level filtering
+    metadata = {
+        "framework_id": record_id,
+        "framework_name": name,
+        "doc_type": "framework",
+    }
+
+    # Owner — filterable keyword
+    if record.get("owner"):
+        metadata["owner"] = record["owner"]
+
+    # Count
+    if record.get("count") is not None:
+        metadata["control_count"] = int(record["count"]) if isinstance(record["count"], (int, float)) else str(record["count"])
+
+    # Assessment categories — list of keywords for filtering
+    if record.get("assessmentCategory"):
+        cats = record["assessmentCategory"]
+        if isinstance(cats, list):
+            metadata["assessment_categories"] = [str(c) for c in cats]
+        else:
+            metadata["assessment_categories"] = [str(cats)]
+
+    # Regions — list of keywords for filtering
+    if record.get("region"):
+        regions = record["region"]
+        if isinstance(regions, list):
+            metadata["regions"] = [str(r) for r in regions]
+        else:
+            metadata["regions"] = [str(regions)]
+
+    # Verticals — list of keywords for filtering
+    if record.get("verticals"):
+        verticals = record["verticals"]
+        if isinstance(verticals, list):
+            metadata["verticals"] = [str(v) for v in verticals]
+        else:
+            metadata["verticals"] = [str(verticals)]
+
+    # Search keywords — flattened for keyword matching
+    if record.get("searchAttributesAsJson"):
+        metadata["search_keywords"] = str(record["searchAttributesAsJson"])
+
+    # Policy documents — presence flag + count for filtering
+    if record.get("policyDocuments"):
+        docs = record["policyDocuments"]
+        if isinstance(docs, list) and docs:
+            metadata["has_policy_documents"] = True
+            metadata["policy_document_count"] = len(docs)
+
+    # Policy links — presence flag + count for filtering
+    if record.get("policyLinks"):
+        links = record["policyLinks"]
+        if isinstance(links, list) and links:
+            metadata["has_policy_links"] = True
+            metadata["policy_link_count"] = len(links)
+
+    return metadata
+
+
+# ───────────────────────────────────────────────────────────────────
+# 3. FLATTEN record into PLAIN TEXT for Pinecone embedding
 # ───────────────────────────────────────────────────────────────────
 def flatten_for_rag(record: dict) -> str:
-    """Convert an unmarshalled framework record into a readable markdown document."""
+    """
+    Convert an unmarshalled framework record into plain text.
+    No markdown formatting — Pinecone works best with clean readable text.
+    Each field is presented as 'Label: Value' on its own line.
+    """
     lines = []
     record_id = record.get("id", "Unknown")
     name = record.get("name", "Unknown")
 
-    lines.append(f"# Framework: {name} (ID: {record_id})")
+    lines.append(f"Framework: {name}")
+    lines.append(f"Framework ID: {record_id}")
     lines.append("")
 
-    # ── Core Fields ──
+    # Core Fields
     if record.get("description"):
-        lines.append(f"**Description:** {record['description']}")
+        lines.append(f"Description: {record['description']}")
 
     if record.get("owner"):
-        lines.append(f"**Owner:** {record['owner']}")
+        lines.append(f"Owner: {record['owner']}")
 
     if record.get("name"):
-        lines.append(f"**Name:** {record['name']}")
+        lines.append(f"Name: {record['name']}")
 
     if record.get("count") is not None:
-        lines.append(f"**Count:** {record['count']}")
+        lines.append(f"Count: {record['count']}")
 
-    # ── Assessment Categories ──
+    # Assessment Categories
     if record.get("assessmentCategory"):
         cats = record["assessmentCategory"]
         if isinstance(cats, list):
-            lines.append(f"\n**Assessment Categories:** {', '.join(str(c) for c in cats)}")
+            lines.append(f"Assessment Categories: {', '.join(str(c) for c in cats)}")
         else:
-            lines.append(f"\n**Assessment Categories:** {cats}")
+            lines.append(f"Assessment Categories: {cats}")
 
-    # ── Regions ──
+    # Regions
     if record.get("region"):
         regions = record["region"]
         if isinstance(regions, list):
-            lines.append(f"**Regions:** {', '.join(str(r) for r in regions)}")
+            lines.append(f"Regions: {', '.join(str(r) for r in regions)}")
         else:
-            lines.append(f"**Regions:** {regions}")
+            lines.append(f"Regions: {regions}")
 
-    # ── Verticals ──
+    # Verticals
     if record.get("verticals"):
         verticals = record["verticals"]
         if isinstance(verticals, list):
-            lines.append(f"**Verticals:** {', '.join(str(v) for v in verticals)}")
+            lines.append(f"Verticals: {', '.join(str(v) for v in verticals)}")
         else:
-            lines.append(f"**Verticals:** {verticals}")
+            lines.append(f"Verticals: {verticals}")
 
-    # ── Search Attributes ──
+    # Search Attributes
     if record.get("searchAttributesAsJson"):
-        lines.append(f"**Search Keywords:** {record['searchAttributesAsJson']}")
+        lines.append(f"Search Keywords: {record['searchAttributesAsJson']}")
 
-    # ── Framework Image ──
+    # Framework Image
     if record.get("frameWorkImgUrl"):
-        lines.append(f"\n**Framework Image:** {record['frameWorkImgUrl']}")
+        lines.append(f"Framework Image URL: {record['frameWorkImgUrl']}")
 
-    # ── Policy Documents ──
+    # Policy Documents
     if record.get("policyDocuments"):
         docs = record["policyDocuments"]
         if isinstance(docs, list) and docs:
-            lines.append("\n## Policy Documents")
+            lines.append("")
+            lines.append("Policy Documents:")
             for i, doc in enumerate(docs, 1):
-                lines.append(f"- [{doc}]({doc})")
+                lines.append(f"  {i}. {doc}")
 
-    # ── Policy Links ──
+    # Policy Links
     if record.get("policyLinks"):
         links = record["policyLinks"]
         if isinstance(links, list) and links:
-            lines.append("\n## Policy Links")
+            lines.append("")
+            lines.append("Policy Links:")
             for link in links:
-                lines.append(f"- [{link}]({link})")
+                lines.append(f"  - {link}")
 
-    # ── Catch-all for any other fields not explicitly handled ──
+    # Catch-all for any other fields not explicitly handled
     handled_keys = {
         "id", "name", "description", "owner", "count",
         "assessmentCategory", "region", "verticals",
@@ -110,21 +203,22 @@ def flatten_for_rag(record: dict) -> str:
     }
     extra_fields = {k: v for k, v in record.items() if k not in handled_keys and v is not None}
     if extra_fields:
-        lines.append("\n## Additional Information")
+        lines.append("")
+        lines.append("Additional Information:")
         for key, val in extra_fields.items():
             if isinstance(val, (list, dict)):
-                lines.append(f"- **{key}:** {json.dumps(val, default=str)}")
+                lines.append(f"  {key}: {json.dumps(val, default=str)}")
             else:
-                lines.append(f"- **{key}:** {val}")
+                lines.append(f"  {key}: {val}")
 
     return "\n".join(lines)
 
 
 # ───────────────────────────────────────────────────────────────────
-# 3. SCAN DynamoDB → Upload to S3
+# 4. SCAN DynamoDB → Upload to S3
 # ───────────────────────────────────────────────────────────────────
 def scan_and_upload():
-    """Scan all items from DynamoDB, unmarshall, flatten, and upload to S3."""
+    """Scan all items from DynamoDB, unmarshall, flatten to plain text, and upload to S3."""
     print(f"\n📖 Scanning DynamoDB table: {DYNAMODB_TABLE}")
 
     all_items = []
@@ -163,7 +257,7 @@ def scan_and_upload():
     else:
         print("  No existing files to delete.")
 
-    # Upload each record as a separate markdown file
+    # Upload each record as plain text + metadata
     print(f"\n📤 Uploading to s3://{S3_BUCKET}/{S3_PREFIX}/")
     uploaded = 0
     for item in all_items:
@@ -171,34 +265,27 @@ def scan_and_upload():
             clean_record = unmarshall(item)
             record_id = clean_record.get("id", f"unknown-{uploaded}")
 
-            # Upload as readable markdown (optimized for RAG)
+            # Upload as plain text (optimized for Pinecone vector embedding)
             text_content = flatten_for_rag(clean_record)
-            text_key = f"{S3_PREFIX}/{record_id}.md"
+            text_key = f"{S3_PREFIX}/{record_id}.txt"
             s3.put_object(
                 Bucket=S3_BUCKET,
                 Key=text_key,
                 Body=text_content.encode("utf-8"),
-                ContentType="text/markdown"
+                ContentType="text/plain"
             )
 
-            # Upload metadata file for Bedrock KB filtering
-            fw_name = clean_record.get("name", "Unknown")
-
-            metadata = {
-                "metadataAttributes": {
-                    "framework_id": record_id,
-                    "framework_name": fw_name,
-                    "doc_type": "framework"
-                }
-            }
-            metadata_key = f"{S3_PREFIX}/{record_id}.md.metadata.json"
+            # Upload metadata file for Pinecone keyword-based filtering
+            metadata = build_pinecone_metadata(clean_record)
+            metadata_key = f"{S3_PREFIX}/{record_id}.metadata.json"
             s3.put_object(
                 Bucket=S3_BUCKET,
                 Key=metadata_key,
-                Body=json.dumps(metadata).encode("utf-8"),
+                Body=json.dumps(metadata, indent=2).encode("utf-8"),
                 ContentType="application/json"
             )
 
+            fw_name = clean_record.get("name", "Unknown")
             uploaded += 1
             print(f"  ✅ {record_id} — {fw_name} ({len(text_content)} chars) — metadata uploaded")
 
@@ -215,7 +302,7 @@ def scan_and_upload():
 
 
 # ───────────────────────────────────────────────────────────────────
-# 4. SYNC Bedrock Knowledge Base
+# 5. SYNC Bedrock Knowledge Base
 # ───────────────────────────────────────────────────────────────────
 def sync_knowledge_base():
     """Start ingestion job and wait for completion."""
@@ -265,7 +352,7 @@ def sync_knowledge_base():
 # ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 60)
-    print("  DynamoDB → S3 → Bedrock KB Pipeline")
+    print("  DynamoDB → S3 (Plain Text) → Pinecone Pipeline")
     print(f"  Table: {DYNAMODB_TABLE}")
     print(f"  S3:    s3://{S3_BUCKET}/{S3_PREFIX}/")
     print(f"  KB:    {KNOWLEDGE_BASE_ID}")

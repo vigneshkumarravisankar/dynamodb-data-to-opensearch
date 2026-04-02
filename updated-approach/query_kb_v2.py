@@ -43,6 +43,29 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 _dynamodb = boto3.client("dynamodb", region_name=REGION)
 _deserializer = TypeDeserializer()
 
+# Regex to extract cloudId from natural language queries
+_CLOUD_ID_RE = re.compile(
+    r'(?:with\s+)?cloud\s*id\s*[-\u2013\u2014:=]*\s*([a-f0-9\-]{36})',
+    re.IGNORECASE,
+)
+
+
+def _extract_cloud_id(query: str) -> tuple[str, str]:
+    """Extract cloudId from query text and return (cloud_id, cleaned_query).
+
+    Supports patterns like:
+      - "... with cloudId - d66cb7c7-..."
+      - "... cloudId: d66cb7c7-..."
+      - "... cloudId d66cb7c7-..."
+    Returns ("", original_query) if no cloudId found.
+    """
+    m = _CLOUD_ID_RE.search(query)
+    if not m:
+        return "", query
+    cloud_id = m.group(1)
+    cleaned = query[:m.start()].rstrip(" ,;-\u2013\u2014") + query[m.end():]
+    return cloud_id, cleaned.strip()
+
 
 # ───────────────────────────────────────────────────────────────────
 # ENTITY CATALOG — loaded once from DynamoDB
@@ -146,9 +169,7 @@ _SECTION_DESCRIPTIONS = """01_overview: Use case overview — model name, AI cat
 20_monitoring_day: Day-wise AI monitoring results — daily run info, run_id, job_id, input dataset, model info, monitoring window, daily metric values, drift analysis, data quality, alerts, monitoring status
 fw_01_overview: Framework overview — framework name, description, owner, category
 fw_02_policy_references: Framework policy references — policy documents, links, regulatory references
-ctrl_01_overview: Control overview — control name, description, hierarchy, classification
-ctrl_02_maturity_levels: Control maturity levels — level definitions, criteria
-ctrl_03_framework_associations: Control framework associations — which frameworks a control belongs to
+ctrl_overview: Control overview, maturity levels, and framework associations — control name, description, hierarchy, classification, AI maturity level definitions, and which frameworks a control belongs to
 fc_01_framework_summary: Framework-controls summary — framework with attached control count
 fc_02_attached_controls: Framework-controls list — all controls attached to a framework""".strip()
 
@@ -166,7 +187,7 @@ _HEAVY_SECTIONS = {
     "11_model_validation", "12_framework_kcis",
     "15_ai_sbom", "17_ai_security_threats", "20_monitoring_day",
     "fc_02_attached_controls",
-    "ctrl_03_framework_associations",
+    "ctrl_overview",
 }
 _MEDIUM_SECTIONS = {
     "06_jira_stories", "05_metrics", "09_rollout_and_epics",
@@ -175,41 +196,75 @@ _MEDIUM_SECTIONS = {
     "18_ai_chart_data", "19_ai_agent_evaluators",
     "fw_01_overview", "fw_02_policy_references",
     "fc_01_framework_summary",
-    "ctrl_01_overview", "ctrl_02_maturity_levels",
 }
 
 
-def _validate_ids(result: dict, catalog: dict) -> None:
-    """Validate / correct entity IDs against the catalog.
+def _resolve_entities(query: str) -> dict:
+    """Resolve entity IDs from the query using Python string matching.
 
-    LLMs sometimes truncate leading zeros (e.g. AI-CTRL-0045 instead of
-    AI-CTRL-00045).  This function checks each returned ID and, if it
-    doesn't match exactly, tries to find the closest match by comparing
-    the numeric suffix.
+    Strategy (in order):
+      1. Regex match explicit IDs  (AI-UC-AST-*, AI-ADF-*, AI-CTRL-*)
+      2. Exact case-insensitive name match against the catalog
+      3. Substring match (catalog name found inside query)
+
+    Returns dict with usecase_id, framework_id, control_id (str | None).
     """
-    id_fields = [
-        ("usecase_id",   "usecases"),
-        ("framework_id", "frameworks"),
-        ("control_id",   "controls"),
-    ]
-    for field, catalog_key in id_fields:
-        val = result.get(field)
-        if not val:
-            continue
-        valid_ids = {item["id"] for item in catalog.get(catalog_key, [])}
-        if val in valid_ids:
-            continue
-        # Try numeric-suffix match
-        suffix = val.rsplit("-", 1)[-1].lstrip("0") or "0"
-        for vid in sorted(valid_ids):
-            vid_suffix = vid.rsplit("-", 1)[-1].lstrip("0") or "0"
-            if vid_suffix == suffix and vid.split("-")[0:2] == val.split("-")[0:2]:
-                result[field] = vid
-                break
+    catalog = _load_catalog()
+    q_lower = query.lower()
+
+    # 1. Regex — explicit IDs in the query
+    uc_id = fw_id = ctrl_id = None
+
+    m = re.search(r'(AI-UC-AST-\d+)', query, re.IGNORECASE)
+    if m:
+        uc_id = m.group(1).upper()
+    m = re.search(r'(AI-ADF-\d+)', query, re.IGNORECASE)
+    if m:
+        fw_id = m.group(1).upper()
+    m = re.search(r'(AI-CTRL-\d+)', query, re.IGNORECASE)
+    if m:
+        ctrl_id = m.group(1).upper()
+
+    # 2 & 3. Name matching against catalog (skip if already resolved by regex)
+    def _match(items: list[dict], resolved_id: str | None) -> str | None:
+        if resolved_id:
+            # Validate the regex-extracted ID exists in catalog
+            valid = {it["id"] for it in items}
+            if resolved_id in valid:
+                return resolved_id
+            # Try numeric-suffix correction (e.g. AI-CTRL-0045 → AI-CTRL-00045)
+            suffix = resolved_id.rsplit("-", 1)[-1].lstrip("0") or "0"
+            prefix_parts = resolved_id.split("-")[0:2]
+            for vid in sorted(valid):
+                vid_suffix = vid.rsplit("-", 1)[-1].lstrip("0") or "0"
+                if vid_suffix == suffix and vid.split("-")[0:2] == prefix_parts:
+                    return vid
+            return resolved_id  # pass through even if not in catalog
+        # Name match: longest match wins (avoids "ISO" matching before "ISO 42001")
+        best_id, best_len = None, 0
+        for item in items:
+            name = item.get("name", "")
+            if not name:
+                continue
+            name_lower = name.lower()
+            if name_lower in q_lower and len(name) > best_len:
+                best_id = item["id"]
+                best_len = len(name)
+        return best_id
+
+    uc_id = _match(catalog.get("usecases", []), uc_id)
+    fw_id = _match(catalog.get("frameworks", []), fw_id)
+    ctrl_id = _match(catalog.get("controls", []), ctrl_id)
+
+    return {
+        "usecase_id": uc_id or None,
+        "framework_id": fw_id or None,
+        "control_id": ctrl_id or None,
+    }
 
 
 def classify_query(query: str) -> dict:
-    """Use LLM to auto-classify which entities and sections the query is about.
+    """Classify query: resolve entities in Python, classify sections via LLM.
 
     Returns dict with keys:
       - usecase_id:   str | None
@@ -217,146 +272,85 @@ def classify_query(query: str) -> dict:
       - control_id:   str | None
       - sections:     list[str]     (empty [] = search all sections)
     """
-    # ── Fast path: extract explicit IDs via regex ──
-    explicit_uc = None
-    explicit_fw = None
-    explicit_ctrl = None
+    # ── Step 1: Resolve entities in Python (no LLM, no tokens) ──
+    entities = _resolve_entities(query)
 
-    m = re.search(r'(AI-UC-AST-\d+)', query, re.IGNORECASE)
-    if m:
-        explicit_uc = m.group(1).upper()
-    m = re.search(r'(AI-ADF-\d+)', query, re.IGNORECASE)
-    if m:
-        explicit_fw = m.group(1).upper()
-    m = re.search(r'(AI-CTRL-\d+)', query, re.IGNORECASE)
-    if m:
-        explicit_ctrl = m.group(1).upper()
-
-    # ── Build compact catalog strings for the LLM ──
-    catalog = _load_catalog()
-
-    uc_list = "\n".join(
-        f"  {u['id']}: {u['name']}" for u in catalog.get("usecases", [])
-    ) or "  (none)"
-    fw_list = "\n".join(
-        f"  {f['id']}: {f['name']}" for f in catalog.get("frameworks", [])
-    ) or "  (none)"
-    ctrl_list = "\n".join(
-        f"  {c['id']}: {c['name']}" for c in catalog.get("controls", [])
-    ) or "  (none)"
-
-    classification_prompt = f"""You are an entity classifier for an AI governance knowledge base.
-Given the user's query, identify which specific entities they are asking about
-and which content sections are relevant.
-
-AVAILABLE USE CASES:
-{uc_list}
-
-AVAILABLE FRAMEWORKS:
-{fw_list}
-
-AVAILABLE CONTROLS:
-{ctrl_list}
+    # ── Step 2: LLM classifies SECTIONS only (lightweight prompt) ──
+    section_prompt = f"""You are a section classifier for an AI governance knowledge base.
+Given the user's query, determine which content sections are relevant.
 
 AVAILABLE SECTIONS:
 {_SECTION_DESCRIPTIONS}
 
-RULES:
-- usecase_id: Set to the exact ID if the query mentions or implies a specific use case. null otherwise.
-- framework_id: Set to the exact ID if the query mentions or implies a specific framework. null otherwise.
-- control_id: Set to the exact ID if the query mentions or implies a specific control. null otherwise.
-- sections: List of section name(s) most relevant to the query. If the query is broad
-  (e.g. "tell me everything"), include ["01_overview", "02_document_summary", "07_risk_and_controls"].
-  Return [] ONLY if you truly cannot determine the topic.
+ENTITY CONTEXT (already resolved):
+- usecase_id: {entities['usecase_id'] or 'None'}
+- framework_id: {entities['framework_id'] or 'None'}
+- control_id: {entities['control_id'] or 'None'}
 
 SECTION ROUTING RULES:
-- Sections starting with "01_" through "12_" are USE CASE sections — use ONLY when the query
-  targets a specific use case (by name or ID). These require usecase_id.
-- Sections starting with "fw_" are FRAMEWORK-ONLY sections — use when asking about a framework's
-  details, description, owner, policies. Set framework_id and use fw_ sections.
-- Sections starting with "ctrl_" are CONTROL-ONLY sections — use when asking about a specific
-  control's details, maturity levels, or which frameworks it belongs to. Set control_id.
-- Sections starting with "fc_" are FRAMEWORK-CONTROLS sections — use when asking about which
-  controls are attached to a framework (without a use case context). Set framework_id.
+- Sections 01_ through 12_ are USE CASE sections — use ONLY when usecase_id is set.
+- Sections fw_* are FRAMEWORK-ONLY — use when asking about a framework's details, description, owner, policies.
+- Sections ctrl_* are CONTROL-ONLY — use when asking about a control's details, maturity, framework associations.
+- Sections fc_* are FRAMEWORK-CONTROLS — use when listing controls attached to a framework.
 
 SPECIFIC RULES:
-- When asking to LIST controls for a USE CASE → use 12_framework_kcis (requires usecase_id).
-- When asking to LIST controls for a FRAMEWORK (no use case) → use fc_02_attached_controls (requires framework_id).
-- When asking about a FRAMEWORK's overview/details → use fw_01_overview (requires framework_id).
-- When asking about a CONTROL's overview/details → use ctrl_01_overview (requires control_id).
-- When asking about a CONTROL's maturity level → use ctrl_02_maturity_levels (requires control_id).
-- When asking about policy documents/links for a framework → use fw_02_policy_references.
-- 07_risk_and_controls is for risk POSTURE summaries only, NOT individual controls.
-- 07b_threat_assessment is for threat assessment controls — use when asking about threat control statuses (Met, Implemented, Risk Accepted, Not Met, Not Applicable), evidence attachments, remediation, identified threats, or Jira stories for unmet threat controls. Use 07b_threat_assessment (NOT 07_risk_and_controls) when the query mentions threats, threat assessment, evidence, or control status.
-
-AI EVAL & MONITORING ROUTING (sections 13-20):
-- When asking about AI evaluation scores, metric values, fraud rate, accuracy scores → use 14_ai_eval_metrics (NOT 05_metrics).
-  05_metrics is for metric DEFINITIONS/thresholds; 14_ai_eval_metrics has actual MEASURED values.
-- When asking about SBOM, software components, vulnerabilities, CVEs, packages → use 15_ai_sbom (NOT 03_ai_bom).
-  03_ai_bom is the AI architecture BOM; 15_ai_sbom is the software vulnerability/package analysis.
-- When asking about CSPM, cloud security posture, security score, policy compliance → use 16_ai_cspm.
-- When asking about security threats, prompt injection, tool abuse, adversarial attacks → use 17_ai_security_threats (NOT 07_risk_and_controls).
-- When asking about metric trends, charts, historical data → use 18_ai_chart_data.
-- When asking about evaluators, evaluation criteria, judging methods → use 19_ai_agent_evaluators.
-- When asking about model monitoring, daily monitoring, drift, data quality, monitoring alerts, monitoring status → use 20_monitoring_day.
-- When asking about model info, version, approval from validation → use 13_ai_model_info.
-- When the user asks broadly about "AI evaluation", "validation results", or "monitoring" for a use case,
-  include multiple sections: [14_ai_eval_metrics, 15_ai_sbom, 16_ai_cspm, 17_ai_security_threats, 19_ai_agent_evaluators].
-- When the user asks about "drift" or "data quality" → ALWAYS use 20_monitoring_day (NOT 11_model_validation).
-
-- IMPORTANT: Copy IDs EXACTLY as shown in the catalogs above. Do NOT modify, truncate,
-  or change the number of digits in any ID.
+- LIST controls for a USE CASE → 12_framework_kcis
+- LIST controls for a FRAMEWORK → fc_02_attached_controls
+- Framework overview/details → fw_01_overview
+- Control overview/details/maturity → ctrl_overview
+- Policy documents → fw_02_policy_references
+- Risk POSTURE summary → 07_risk_and_controls (NOT individual controls)
+- Threat assessment, control statuses, evidence → 07b_threat_assessment (NOT 07_risk_and_controls)
+- AI eval scores, fraud rate, accuracy → 14_ai_eval_metrics (NOT 05_metrics)
+- SBOM, vulnerabilities, CVEs → 15_ai_sbom (NOT 03_ai_bom)
+- CSPM, security score → 16_ai_cspm`
+- Security threats, prompt injection → 17_ai_security_threats
+- Metric trends, charts → 18_ai_chart_data
+- Evaluators, judging methods → 19_ai_agent_evaluators
+- Model monitoring, drift, data quality → 20_monitoring_day (NOT 11_model_validation)
+- Model info, version, approval → 13_ai_model_info
+- Broad "AI evaluation" or "validation results" → [14_ai_eval_metrics, 15_ai_sbom, 16_ai_cspm, 17_ai_security_threats, 19_ai_agent_evaluators]
+- Broad query → ["01_overview", "02_document_summary", "07_risk_and_controls"]
+- Return [] ONLY if you truly cannot determine the topic.
 
 Return ONLY valid JSON:
-{{"usecase_id": "..." or null, "framework_id": "..." or null, "control_id": "..." or null, "sections": [...]}}
+{{"sections": [...]}}
 
 User query: {query}"""
 
     try:
         resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # fast + cheap for classification
-            messages=[{"role": "user", "content": classification_prompt}],
-            temperature=0,
-            max_tokens=200,
+            model="gpt-5-mini",
+            messages=[{"role": "user", "content": section_prompt}],
+            max_completion_tokens=500,
             response_format={"type": "json_object"},
         )
-        result = json.loads(resp.choices[0].message.content)
+        llm_result = json.loads(resp.choices[0].message.content)
     except Exception as e:
-        print(f"  [classify] LLM classification failed: {e}")
-        result = {}
-
-    # Override with explicit IDs when found directly in the query text
-    if explicit_uc:
-        result["usecase_id"] = explicit_uc
-    if explicit_fw:
-        result["framework_id"] = explicit_fw
-    if explicit_ctrl:
-        result["control_id"] = explicit_ctrl
+        print(f"  [classify] LLM section classification failed: {e}")
+        llm_result = {}
 
     # Validate / sanitise sections
-    raw_sections = result.get("sections")
+    raw_sections = llm_result.get("sections")
     if not isinstance(raw_sections, list):
         raw_sections = []
-    # 20_monitoring_day is a prefix — allow it through even though
-    # actual section names are 20_monitoring_day_1, day_2, etc.
-    result["sections"] = [
+    sections = [
         s for s in raw_sections
         if s in _VALID_SECTIONS or s.startswith("20_monitoring_day")
     ]
 
-    # Validate entity IDs against catalog (fix truncated zeros, etc.)
-    _validate_ids(result, catalog)
-
-    # Ensure null → None for missing keys
-    for key in ("usecase_id", "framework_id", "control_id"):
-        if not result.get(key):
-            result[key] = None
+    result = {
+        "usecase_id": entities["usecase_id"],
+        "framework_id": entities["framework_id"],
+        "control_id": entities["control_id"],
+        "sections": sections,
+    }
 
     print(
-        f"  [classify] usecase={result.get('usecase_id')}, "
-        f"framework={result.get('framework_id')}, "
-        f"control={result.get('control_id')}, "
-        f"sections={result.get('sections')}"
+        f"  [classify] usecase={result['usecase_id']}, "
+        f"framework={result['framework_id']}, "
+        f"control={result['control_id']}, "
+        f"sections={result['sections']}"
     )
     return result
 
@@ -379,11 +373,15 @@ def _token_budget(sections: list[str] | None = None) -> int:
 # ───────────────────────────────────────────────────────────────────
 # RETRIEVE — Section-filtered, paginated
 # ───────────────────────────────────────────────────────────────────
-def retrieve(query: str, top_k: int = 10, classification: dict | None = None) -> list[dict]:
+def retrieve(query: str, top_k: int = 10, classification: dict | None = None, cloud_id: str = "") -> list[dict]:
     """
     Retrieve relevant chunks from Bedrock KB.
     Uses LLM classification to apply entity + section metadata filters.
     """
+    # ── Extract cloud_id from query if not passed explicitly ──
+    if not cloud_id:
+        cloud_id, query = _extract_cloud_id(query)
+
     # ── Classify if not already provided ──
     if classification is None:
         classification = classify_query(query)
@@ -402,16 +400,21 @@ def retrieve(query: str, top_k: int = 10, classification: dict | None = None) ->
     retrieval_config = {
         "vectorSearchConfiguration": {
             "numberOfResults": min(top_k, 100),
-            "overrideSearchType": "HYBRID"
+            "overrideSearchType": "SEMANTIC",
         }
     }
 
     # ── Build metadata filters from classification ──
+    # cloudId is ALWAYS the first filter — scopes to this tenant
+    if not cloud_id:
+        print("  [retrieve] Blocked — cloud_id is required")
+        return []
+    filters = [{"equals": {"key": "cloudId", "value": cloud_id}}]
+
     # Determine the entity type based on section prefixes.
     # fw_* / fc_* sections → filter by framework_id
     # ctrl_* sections → filter by control_id
     # 01_-12_ sections → filter by usecase_id
-    filters = []
 
     has_fw_sections = any(s.startswith(("fw_", "fc_")) for s in sections)
     has_ctrl_sections = any(s.startswith("ctrl_") for s in sections)
@@ -500,16 +503,30 @@ def retrieve(query: str, top_k: int = 10, classification: dict | None = None) ->
 # ───────────────────────────────────────────────────────────────────
 # RETRIEVE + GENERATE — No summarisation needed
 # ───────────────────────────────────────────────────────────────────
-def retrieve_and_generate(query: str, top_k: int = 10) -> dict:
+def retrieve_and_generate(query: str, top_k: int = 10, cloud_id: str = "") -> dict:
     """
     Section-aware RAG pipeline:
-      1. Classify query (LLM) → entity IDs + sections
-      2. Retrieve with metadata filters
-      3. Filter by score
-      4. Pass directly to LLM (no summarisation — sections are small)
+      1. Extract cloud_id from query (if not passed explicitly)
+      2. Classify query (LLM) → entity IDs + sections
+      3. Retrieve with metadata filters
+      4. Filter by score
+      5. Pass directly to LLM (no summarisation — sections are small)
     """
+    # Extract cloud_id from query text if not passed explicitly
+    if not cloud_id:
+        cloud_id, query = _extract_cloud_id(query)
+    if not cloud_id:
+        return {
+            "answer": "Cloud ID (tenant) is required. Include 'cloudId - <value>' in your question.",
+            "sources": [], "chunks_used": 0,
+            "retrieval_scores": [], "mean_score": 0,
+        }
+    print(f"  [tenant] cloudId={cloud_id}")
+
     classification = classify_query(query)
-    chunks = retrieve(query, top_k=top_k, classification=classification)
+    sections = classification.get("sections") or []
+
+    chunks = retrieve(query, top_k=top_k, classification=classification, cloud_id=cloud_id)
 
     if not chunks:
         return {
@@ -539,7 +556,7 @@ def retrieve_and_generate(query: str, top_k: int = 10) -> dict:
     answer_budget = _token_budget(classification.get("sections"))
 
     response = openai_client.chat.completions.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+        model=os.getenv("OPENAI_MODEL"),
         messages=[
             {
                 "role": "system",
@@ -548,6 +565,14 @@ def retrieve_and_generate(query: str, top_k: int = 10) -> dict:
                     "risk controls, and AI inventory records.\n\n"
                     "Use ONLY the information from the provided context to answer. "
                     "If the context doesn't contain enough information, say so clearly.\n\n"
+                    "FORMATTING RULES:\n"
+                    "- Use Markdown formatting for readability.\n"
+                    "- Use headers (##, ###) to organize different sections of the answer.\n"
+                    "- Use bullet points or numbered lists when listing items.\n"
+                    "- Use bold (**text**) for field names, IDs, and important labels.\n"
+                    "- Use tables when presenting structured data with multiple columns "
+                    "(e.g. control lists with ID, name, status).\n"
+                    "- Separate logical sections with blank lines.\n\n"
                     "CRITICAL RULES:\n"
                     "- Return ALL data EXACTLY as it appears in the source documents. "
                     "Do NOT rephrase, reword, paraphrase, or alter any content.\n"
@@ -572,16 +597,23 @@ def retrieve_and_generate(query: str, top_k: int = 10) -> dict:
                 "content": f"Context:\n{context}\n\nQuestion: {query}"
             }
         ],
-        temperature=0.1,
-        max_tokens=answer_budget
+        max_completion_tokens=answer_budget
     )
+
+    # Debug: inspect what OpenAI returned
+    choice = response.choices[0]
+    print(f"  [openai] finish_reason={choice.finish_reason}, "
+          f"content_length={len(choice.message.content or '')}, "
+          f"refusal={getattr(choice.message, 'refusal', None)}")
+
+    answer = choice.message.content or "(No answer generated — model returned empty content)"
 
     retrieval_scores = [c["score"] for c in chunks]
     mean_score = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0
     sources = list(set(c["source"] for c in chunks))
 
     return {
-        "answer": response.choices[0].message.content,
+        "answer": answer,
         "sources": sources,
         "chunks_used": len(chunks),
         "retrieval_scores": [round(s, 4) for s in retrieval_scores],
@@ -597,7 +629,9 @@ def chat():
     print("\n" + "=" * 60)
     print("  Section-Based Bedrock KB + OpenAI RAG Chat (v2)")
     print("=" * 60)
-    print("Commands: 'quit' to exit | 'retrieve' for retrieve-only mode\n")
+    print("  Include 'cloudId - <value>' in your question.")
+    print("  Example: Show me controls for ISO 42001 with cloudId - d66cb7c7-...")
+    print("  Commands: 'quit' to exit | 'retrieve' for retrieve-only mode\n")
 
     retrieve_only = False
 

@@ -1,20 +1,15 @@
 """
-Pipeline: staging-fusefy-usecaseAssessments (tenant) → S3 → Bedrock KB
+Pipeline: staging-fusefy-usecaseAssessments (tenant) → S3 (plain text) → Pinecone
 
 This is the AI use case assessment table — each record is a full AI project
-assessment with deeply nested data including:
-  - Use case overview (model name, purpose, approach, risk level)
-  - AI Bill of Material (frameworks, platforms, hardware, inputs/outputs)
-  - Data Bill of Material (datasets, lineage, validation)
-  - Assessment Result / Jira Stories (missing components to implement vs valid)
-  - Risk & Controls analysis (risk categories, control coverage, insights)
-  - Design Document (architecture, APIs, agents, data model, security)
-  - TCO (Total Cost of Ownership breakdown)
-  - Metrics (performance thresholds)
-  - Rollout Plan (phased deployment)
-  - Model Validation Assessment (control items, justifications, risk mitigations)
+assessment with deeply nested data.
 
-Each use case gets its own enriched markdown document in S3.
+Pinecone approach:
+  - First level: keyword-based metadata filtering
+  - Second level: vector similarity on plain text content
+  - No markdown formatting — plain text only
+
+Each use case gets its own enriched plain text document in S3.
 """
 
 import os
@@ -97,12 +92,12 @@ def safe_get(d, *keys, default=""):
     return current if current is not None else default
 
 
-def format_list(items, bullet="- "):
-    """Format a list of items as bullet points."""
+def format_list(items, indent="  "):
+    """Format a list of items as plain text with indentation."""
     if not items:
         return ""
     if isinstance(items, list):
-        return "\n".join(f"{bullet}{item}" for item in items if item)
+        return "\n".join(f"{indent}{item}" for item in items if item)
     return str(items)
 
 
@@ -110,147 +105,135 @@ def format_list(items, bullet="- "):
 # 4. FLATTEN: Use Case Overview
 # ───────────────────────────────────────────────────────────────────
 def flatten_overview(record: dict, framework_lookup: dict = None) -> list[str]:
-    """Flatten the top-level use case fields."""
+    """Flatten the top-level use case fields into plain text."""
     if framework_lookup is None:
         framework_lookup = {}
     lines = []
     uc_id = record.get("id", "Unknown")
     model_name = record.get("modelName", "Unknown")
 
-    lines.append(f"# AI Use Case: {model_name}")
-    lines.append(f"**Use Case ID:** {uc_id}")
-    lines.append(f"**Inventory ID:** {record.get('inventoryId', uc_id)}")
+    lines.append(f"AI Use Case: {model_name}")
+    lines.append(f"Use Case ID: {uc_id}")
+    lines.append(f"Inventory ID: {record.get('inventoryId', uc_id)}")
     lines.append("")
 
-    # Core details
     if record.get("modelSummary"):
-        lines.append(f"**Summary:** {record['modelSummary']}")
+        lines.append(f"Summary: {record['modelSummary']}")
     if record.get("modelDescription"):
-        lines.append(f"**Description:** {record['modelDescription']}")
+        lines.append(f"Description: {record['modelDescription']}")
     if record.get("modelPurpose"):
-        lines.append(f"**Purpose:** {record['modelPurpose']}")
+        lines.append(f"Purpose: {record['modelPurpose']}")
     if record.get("modelUsage"):
-        lines.append(f"**Usage:** {record['modelUsage']}")
+        lines.append(f"Usage: {record['modelUsage']}")
     if record.get("modelInput"):
-        lines.append(f"**Model Input:** {record['modelInput']}")
+        lines.append(f"Model Input: {record['modelInput']}")
     if record.get("modelOutput"):
-        lines.append(f"**Model Output:** {record['modelOutput']}")
-
+        lines.append(f"Model Output: {record['modelOutput']}")
     lines.append("")
 
-    # Business context
     if record.get("businessUsage"):
-        lines.append(f"**Business Usage:** {record['businessUsage']}")
+        lines.append(f"Business Usage: {record['businessUsage']}")
     if record.get("currentBusinessUsage"):
-        lines.append(f"**Current Business Usage (Before AI):** {record['currentBusinessUsage']}")
+        lines.append(f"Current Business Usage (Before AI): {record['currentBusinessUsage']}")
     if record.get("keyActivity"):
-        lines.append(f"**Key Activity:** {record['keyActivity']}")
-
+        lines.append(f"Key Activity: {record['keyActivity']}")
     lines.append("")
 
-    # Classification
     if record.get("aiApproach"):
-        lines.append(f"**AI Approach:** {record['aiApproach']}")
+        lines.append(f"AI Approach: {record['aiApproach']}")
     if record.get("aiCategory"):
-        lines.append(f"**AI Category:** {record['aiCategory']}")
+        lines.append(f"AI Category: {record['aiCategory']}")
     if record.get("AIMethodologyType"):
-        lines.append(f"**AI Methodology:** {record['AIMethodologyType']}")
+        lines.append(f"AI Methodology: {record['AIMethodologyType']}")
     if record.get("baseModelName"):
-        lines.append(f"**Base LLM Model:** {record['baseModelName']}")
+        lines.append(f"Base LLM Model: {record['baseModelName']}")
     if record.get("aiCloudProvider"):
-        lines.append(f"**Cloud Provider:** {record['aiCloudProvider']}")
+        lines.append(f"Cloud Provider: {record['aiCloudProvider']}")
     if record.get("platform"):
-        lines.append(f"**Platform/Tech Stack:** {record['platform']}")
+        lines.append(f"Platform/Tech Stack: {record['platform']}")
     if record.get("development"):
-        lines.append(f"**Development:** {record['development']}")
-
+        lines.append(f"Development: {record['development']}")
     lines.append("")
 
-    # Risk & classification
     if record.get("overallRisk"):
-        lines.append(f"**Overall Risk:** {record['overallRisk']}")
+        lines.append(f"Overall Risk: {record['overallRisk']}")
     if record.get("impact"):
-        lines.append(f"**Impact:** {record['impact']}")
+        lines.append(f"Impact: {record['impact']}")
     if record.get("priorityType"):
-        lines.append(f"**Priority Type:** {record['priorityType']}")
+        lines.append(f"Priority Type: {record['priorityType']}")
     if record.get("level") is not None:
-        lines.append(f"**AI Maturity Level:** {record['level']}")
-
+        lines.append(f"AI Maturity Level: {record['level']}")
     lines.append("")
 
-    # Organization
     if record.get("department"):
-        lines.append(f"**Department:** {record['department']}")
+        lines.append(f"Department: {record['department']}")
     if record.get("sector"):
-        lines.append(f"**Sector:** {record['sector']}")
+        lines.append(f"Sector: {record['sector']}")
     if record.get("targetDivision"):
-        lines.append(f"**Target Division:** {record['targetDivision']}")
+        lines.append(f"Target Division: {record['targetDivision']}")
     if record.get("primaryContact"):
-        lines.append(f"**Primary Contact:** {record['primaryContact']}")
+        lines.append(f"Primary Contact: {record['primaryContact']}")
     if record.get("useFrequency"):
-        lines.append(f"**Use Frequency:** {record['useFrequency']}")
+        lines.append(f"Use Frequency: {record['useFrequency']}")
     if record.get("status"):
-        lines.append(f"**Jira Stories Status:** {record['status']}")
+        lines.append(f"Jira Stories Status: {record['status']}")
     if record.get("processStatus"):
-        lines.append(f"**TCO Generation Status:** {record['processStatus']}")
+        lines.append(f"TCO Generation Status: {record['processStatus']}")
     if record.get("aiArchitectureGeneratingStatus"):
-        lines.append(f"**Architecture Diagram Generation Status:** {record['aiArchitectureGeneratingStatus']}")
+        lines.append(f"Architecture Diagram Generation Status: {record['aiArchitectureGeneratingStatus']}")
     if record.get("aiFeatureGeneratingStatus"):
-        lines.append(f"**Jira Stories Generation Status:** {record['aiFeatureGeneratingStatus']}")
+        lines.append(f"Jira Stories Generation Status: {record['aiFeatureGeneratingStatus']}")
     if record.get("aiProgressGeneratingStatus"):
-        lines.append(f"**Design Document Generation Status:** {record['aiProgressGeneratingStatus']}")
+        lines.append(f"Design Document Generation Status: {record['aiProgressGeneratingStatus']}")
     if record.get("vendorName"):
-        lines.append(f"**Vendor:** {record['vendorName']}")
+        lines.append(f"Vendor: {record['vendorName']}")
     if record.get("modelValidationAssessmentId"):
-        lines.append(f"**Model Validation Assessment ID:** {record['modelValidationAssessmentId']}")
+        lines.append(f"Model Validation Assessment ID: {record['modelValidationAssessmentId']}")
 
-    # Data labels
     if record.get("dataLabels"):
         labels = record["dataLabels"]
         if isinstance(labels, list):
-            lines.append(f"**Data Labels:** {', '.join(str(l) for l in labels)}")
-
+            lines.append(f"Data Labels: {', '.join(str(l) for l in labels)}")
     if record.get("dataLineage"):
-        lines.append(f"**Data Lineage:** {record['dataLineage']}")
-
+        lines.append(f"Data Lineage: {record['dataLineage']}")
     if record.get("processCategories"):
         cats = record["processCategories"]
         if isinstance(cats, list):
-            lines.append(f"**Process Categories:** {', '.join(str(c) for c in cats)}")
+            lines.append(f"Process Categories: {', '.join(str(c) for c in cats)}")
 
     if record.get("riskframeworkid"):
         fw_id = record["riskframeworkid"]
         fw = framework_lookup.get(fw_id)
         if fw:
             lines.append("")
-            lines.append(f"### Risk Framework")
-            lines.append(f"**Framework ID:** {fw_id}")
+            lines.append("Risk Framework")
+            lines.append(f"Framework ID: {fw_id}")
             if fw.get("name"):
-                lines.append(f"**Framework Name:** {fw['name']}")
+                lines.append(f"Framework Name: {fw['name']}")
             if fw.get("description"):
-                lines.append(f"**Framework Description:** {fw['description']}")
+                lines.append(f"Framework Description: {fw['description']}")
             if fw.get("owner"):
-                lines.append(f"**Framework Owner:** {fw['owner']}")
+                lines.append(f"Framework Owner: {fw['owner']}")
             if fw.get("regions"):
                 regions = fw["regions"]
                 if isinstance(regions, list):
-                    lines.append(f"**Framework Regions:** {', '.join(str(r) for r in regions)}")
+                    lines.append(f"Framework Regions: {', '.join(str(r) for r in regions)}")
                 else:
-                    lines.append(f"**Framework Regions:** {regions}")
+                    lines.append(f"Framework Regions: {regions}")
             if fw.get("verticals"):
                 verticals = fw["verticals"]
                 if isinstance(verticals, list):
-                    lines.append(f"**Framework Verticals:** {', '.join(str(v) for v in verticals)}")
+                    lines.append(f"Framework Verticals: {', '.join(str(v) for v in verticals)}")
                 else:
-                    lines.append(f"**Framework Verticals:** {verticals}")
+                    lines.append(f"Framework Verticals: {verticals}")
             if fw.get("assessmentCategories"):
                 cats = fw["assessmentCategories"]
                 if isinstance(cats, list):
-                    lines.append(f"**Assessment Categories:** {', '.join(str(c) for c in cats)}")
+                    lines.append(f"Assessment Categories: {', '.join(str(c) for c in cats)}")
                 else:
-                    lines.append(f"**Assessment Categories:** {cats}")
+                    lines.append(f"Assessment Categories: {cats}")
         else:
-            lines.append(f"**Risk Framework ID:** {fw_id}")
+            lines.append(f"Risk Framework ID: {fw_id}")
 
     return lines
 
@@ -266,42 +249,42 @@ def flatten_ai_bom(record: dict) -> list[str]:
 
     lines = []
     lines.append("")
-    lines.append("## AI Bill of Material")
+    lines.append("AI Bill of Material")
     lines.append("")
 
     for i, item in enumerate(bom, 1):
         if not isinstance(item, dict):
             continue
 
-        lines.append(f"### Component Set {i}")
+        lines.append(f"Component Set {i}")
         if item.get("aiFramework"):
-            lines.append(f"- **AI Framework:** {item['aiFramework']}")
+            lines.append(f"  AI Framework: {item['aiFramework']}")
         if item.get("aiPlatform"):
-            lines.append(f"- **AI Platform:** {item['aiPlatform']}")
+            lines.append(f"  AI Platform: {item['aiPlatform']}")
         if item.get("foundationalLLMProvider"):
-            lines.append(f"- **LLM Provider:** {item['foundationalLLMProvider']}")
+            lines.append(f"  LLM Provider: {item['foundationalLLMProvider']}")
         if item.get("fineTunedFrom"):
-            lines.append(f"- **Fine-Tuned From:** {item['fineTunedFrom']}")
+            lines.append(f"  Fine-Tuned From: {item['fineTunedFrom']}")
         if item.get("components"):
-            lines.append(f"- **Components:** {item['components']}")
+            lines.append(f"  Components: {item['components']}")
         if item.get("hardware"):
-            lines.append(f"- **Hardware:** {item['hardware']}")
+            lines.append(f"  Hardware: {item['hardware']}")
         if item.get("software"):
-            lines.append(f"- **Software:** {item['software']}")
+            lines.append(f"  Software: {item['software']}")
         if item.get("hostingType"):
-            lines.append(f"- **Hosting:** {item['hostingType']}")
+            lines.append(f"  Hosting: {item['hostingType']}")
         if item.get("input"):
-            lines.append(f"- **Input:** {item['input']}")
+            lines.append(f"  Input: {item['input']}")
         if item.get("output"):
-            lines.append(f"- **Output:** {item['output']}")
+            lines.append(f"  Output: {item['output']}")
         if item.get("piiDataProcessed"):
-            lines.append(f"- **PII Data Processed:** {item['piiDataProcessed']}")
+            lines.append(f"  PII Data Processed: {item['piiDataProcessed']}")
         if item.get("humanInLoopRequired"):
-            lines.append(f"- **Human-in-Loop Required:** {item['humanInLoopRequired']}")
+            lines.append(f"  Human-in-Loop Required: {item['humanInLoopRequired']}")
         if item.get("thirdParty"):
-            lines.append(f"- **Third Party:** {item['thirdParty']}")
+            lines.append(f"  Third Party: {item['thirdParty']}")
         if item.get("softwareRequiredForExecution"):
-            lines.append(f"- **Software Required for Execution:** {item['softwareRequiredForExecution']}")
+            lines.append(f"  Software Required for Execution: {item['softwareRequiredForExecution']}")
         lines.append("")
 
     return lines
@@ -318,20 +301,20 @@ def flatten_data_bom(record: dict) -> list[str]:
 
     lines = []
     lines.append("")
-    lines.append("## Data Bill of Material")
+    lines.append("Data Bill of Material")
     lines.append("")
 
     for item in bom:
         if not isinstance(item, dict):
             continue
         name = item.get("datasetName", "Unknown Dataset")
-        lines.append(f"### {name}")
+        lines.append(f"{name}")
         if item.get("version"):
-            lines.append(f"- **Version:** {item['version']}")
+            lines.append(f"  Version: {item['version']}")
         if item.get("dataValidation"):
-            lines.append(f"- **Data Validation:** {item['dataValidation']}")
+            lines.append(f"  Data Validation: {item['dataValidation']}")
         if item.get("lineage"):
-            lines.append(f"- **Lineage:** {item['lineage']}")
+            lines.append(f"  Lineage: {item['lineage']}")
         lines.append("")
 
     return lines
@@ -348,28 +331,28 @@ def flatten_metrics(record: dict) -> list[str]:
 
     lines = []
     lines.append("")
-    lines.append("## Key Performance Indicators")
+    lines.append("Key Performance Indicators")
     lines.append("")
 
     for m in metrics:
         if not isinstance(m, dict):
             continue
         name = m.get("metricName", "Unknown")
-        lines.append(f"### {name}")
+        lines.append(f"{name}")
         if m.get("metricDescription"):
-            lines.append(f"- **Description:** {m['metricDescription']}")
+            lines.append(f"  Description: {m['metricDescription']}")
         if m.get("threshold") is not None:
             unit = m.get("thresholdUnit", "")
             eval_type = m.get("thresholdEvaluation", "")
-            lines.append(f"- **Threshold:** {m['threshold']} {unit} ({eval_type})")
+            lines.append(f"  Threshold: {m['threshold']} {unit} ({eval_type})")
         if m.get("relatedAiComponents"):
             comps = m["relatedAiComponents"]
             if isinstance(comps, list):
-                lines.append(f"- **AI Components:** {', '.join(str(c) for c in comps)}")
+                lines.append(f"  AI Components: {', '.join(str(c) for c in comps)}")
         if m.get("relatedDatasets"):
             ds = m["relatedDatasets"]
             if isinstance(ds, list):
-                lines.append(f"- **Datasets:** {', '.join(str(d) for d in ds)}")
+                lines.append(f"  Datasets: {', '.join(str(d) for d in ds)}")
         lines.append("")
 
     return lines
@@ -390,7 +373,7 @@ def flatten_jira_stories(record: dict) -> list[str]:
 
     lines = []
     lines.append("")
-    lines.append("## Jira Stories (Assessment Result)")
+    lines.append("Jira Stories (Assessment Result)")
     lines.append("")
 
     for result_set in assessment:
@@ -400,7 +383,7 @@ def flatten_jira_stories(record: dict) -> list[str]:
         # ── Missing Components (to implement) ──
         missing = result_set.get("missingComponents", [])
         if missing and isinstance(missing, list):
-            lines.append(f"### Stories to Implement ({len(missing)} items)")
+            lines.append(f"Stories to Implement ({len(missing)} items)")
             lines.append("")
 
             for mc in missing:
@@ -414,29 +397,27 @@ def flatten_jira_stories(record: dict) -> list[str]:
                 lifecycle = mc.get("aiLifecycleStage", "")
                 desc = mc.get("featureDescription", "")
 
-                lines.append(f"#### {feature}")
+                lines.append(f"  {feature}")
                 if issue_id:
-                    lines.append(f"- **Jira Issue:** {issue_id}")
+                    lines.append(f"    Jira Issue: {issue_id}")
                 if mc_id:
-                    lines.append(f"- **Component ID:** {mc_id}")
+                    lines.append(f"    Component ID: {mc_id}")
                 if lifecycle:
-                    lines.append(f"- **AI Lifecycle Stage:** {lifecycle}")
+                    lines.append(f"    AI Lifecycle Stage: {lifecycle}")
                 if days:
-                    lines.append(f"- **Estimated Days:** {days}")
+                    lines.append(f"    Estimated Days: {days}")
                 if desc:
-                    lines.append(f"- **Description:** {desc}")
+                    lines.append(f"    Description: {desc}")
 
-                # Acceptance Criteria
                 criteria = mc.get("acceptanceCriteria", [])
                 if criteria and isinstance(criteria, list):
-                    lines.append(f"- **Acceptance Criteria:**")
+                    lines.append(f"    Acceptance Criteria:")
                     for ac in criteria:
-                        lines.append(f"  - {ac}")
+                        lines.append(f"      {ac}")
 
-                # Associated Controls with Deployment Stages
                 ctrl_stages = mc.get("associatedControlIdStages", {})
                 if ctrl_stages and isinstance(ctrl_stages, dict):
-                    lines.append(f"- **Associated Controls:**")
+                    lines.append(f"    Associated Controls:")
                     for ctrl_id, ctrl_info in ctrl_stages.items():
                         if isinstance(ctrl_info, dict):
                             ctrl_name_list = ctrl_info.get("name", [])
@@ -453,41 +434,40 @@ def flatten_jira_stories(record: dict) -> list[str]:
                             else:
                                 stages_str = str(deploy_stages)
 
-                            lines.append(f"  - **{ctrl_id}** — {ctrl_display}")
+                            lines.append(f"      {ctrl_id} - {ctrl_display}")
                             if ctrl_hierarchy:
-                                lines.append(f"    - Hierarchy: {ctrl_hierarchy}")
-                            lines.append(f"    - Deployment Stages: {stages_str}")
+                                lines.append(f"        Hierarchy: {ctrl_hierarchy}")
+                            lines.append(f"        Deployment Stages: {stages_str}")
                         else:
-                            lines.append(f"  - {ctrl_id}")
+                            lines.append(f"      {ctrl_id}")
 
-                # Gap / Sub-tasks
                 gaps = mc.get("gap", [])
                 if gaps and isinstance(gaps, list):
-                    lines.append(f"- **Sub-tasks (Gaps):**")
+                    lines.append(f"    Sub-tasks (Gaps):")
                     for gap in gaps:
                         if isinstance(gap, dict):
                             gap_name = gap.get("gapName", "")
                             task_id = gap.get("taskid", "")
                             if task_id:
-                                lines.append(f"  - [{task_id}] {gap_name}")
+                                lines.append(f"      [{task_id}] {gap_name}")
                             else:
-                                lines.append(f"  - {gap_name}")
+                                lines.append(f"      {gap_name}")
 
                 lines.append("")
 
         # ── Valid Components (already implemented) ──
         valid = result_set.get("validComponents", [])
         if valid and isinstance(valid, list) and len(valid) > 0:
-            lines.append(f"### Already Implemented ({len(valid)} items)")
+            lines.append(f"Already Implemented ({len(valid)} items)")
             lines.append("")
             for vc in valid:
                 if isinstance(vc, dict):
                     feature = vc.get("feature", "Unknown")
-                    lines.append(f"- ✅ **{feature}**")
+                    lines.append(f"  [Done] {feature}")
                     if vc.get("featureDescription"):
-                        lines.append(f"  - {vc['featureDescription']}")
+                        lines.append(f"    {vc['featureDescription']}")
                 else:
-                    lines.append(f"- ✅ {vc}")
+                    lines.append(f"  [Done] {vc}")
             lines.append("")
 
     return lines
@@ -504,16 +484,15 @@ def flatten_risk_and_controls(record: dict) -> list[str]:
 
     lines = []
     lines.append("")
-    lines.append("## Risk & Controls Analysis")
+    lines.append("Risk and Controls Analysis")
     lines.append("")
 
-    # Summary
     summary = rac.get("summary", {})
     if summary and isinstance(summary, dict):
-        lines.append(f"**Overall Risk Posture:** {summary.get('overallRiskPosture', 'N/A')}")
-        lines.append(f"**Risks Identified:** {summary.get('risksIdentified', 'N/A')}")
-        lines.append(f"**Applicable Controls:** {summary.get('applicableControls', 'N/A')}")
-        lines.append(f"**Total Framework Controls:** {summary.get('totalFrameworkControls', 'N/A')}")
+        lines.append(f"Overall Risk Posture: {summary.get('overallRiskPosture', 'N/A')}")
+        lines.append(f"Risks Identified: {summary.get('risksIdentified', 'N/A')}")
+        lines.append(f"Applicable Controls: {summary.get('applicableControls', 'N/A')}")
+        lines.append(f"Total Framework Controls: {summary.get('totalFrameworkControls', 'N/A')}")
 
         sev = summary.get("severityBreakdown", {})
         if sev and isinstance(sev, dict):
@@ -522,55 +501,51 @@ def flatten_risk_and_controls(record: dict) -> list[str]:
                 if sev.get(level) is not None:
                     parts.append(f"{level.capitalize()}: {sev[level]}")
             if parts:
-                lines.append(f"**Severity Breakdown:** {', '.join(parts)}")
+                lines.append(f"Severity Breakdown: {', '.join(parts)}")
         lines.append("")
 
-    # Framework context
     fw_ctx = rac.get("frameworkContext", {})
     if fw_ctx and isinstance(fw_ctx, dict):
         if fw_ctx.get("name"):
-            lines.append(f"**Framework:** {fw_ctx['name']}")
+            lines.append(f"Framework: {fw_ctx['name']}")
         if fw_ctx.get("description"):
-            lines.append(f"**Framework Description:** {fw_ctx['description']}")
+            lines.append(f"Framework Description: {fw_ctx['description']}")
         lines.append("")
 
-    # Assessment Insights
     insights = rac.get("assessmentInsights", {})
     if insights and isinstance(insights, dict):
-        lines.append("### Assessment Insights")
+        lines.append("Assessment Insights")
         if insights.get("riskApplicabilitySummary"):
-            lines.append(f"- **Risk Applicability:** {insights['riskApplicabilitySummary']}")
+            lines.append(f"  Risk Applicability: {insights['riskApplicabilitySummary']}")
         if insights.get("residualRiskOverview"):
-            lines.append(f"- **Residual Risk:** {insights['residualRiskOverview']}")
+            lines.append(f"  Residual Risk: {insights['residualRiskOverview']}")
         if insights.get("keyTakeaways"):
-            lines.append(f"- **Key Takeaways:** {insights['keyTakeaways']}")
+            lines.append(f"  Key Takeaways: {insights['keyTakeaways']}")
         lines.append("")
 
-    # Control Coverage
     coverage = rac.get("controlCoverage", {})
     if coverage and isinstance(coverage, dict):
-        lines.append("### Control Coverage")
+        lines.append("Control Coverage")
         covered = coverage.get("covered", [])
         if covered and isinstance(covered, list):
-            lines.append(f"- **Covered ({len(covered)}):** {', '.join(str(c) for c in covered)}")
+            lines.append(f"  Covered ({len(covered)}): {', '.join(str(c) for c in covered)}")
         partial = coverage.get("partial", [])
         if partial and isinstance(partial, list):
-            lines.append(f"- **Partial ({len(partial)}):** {', '.join(str(c) for c in partial)}")
+            lines.append(f"  Partial ({len(partial)}): {', '.join(str(c) for c in partial)}")
         gap = coverage.get("gap", [])
         if gap and isinstance(gap, list):
-            lines.append(f"- **Gap ({len(gap)}):** {', '.join(str(c) for c in gap)}")
+            lines.append(f"  Gap ({len(gap)}): {', '.join(str(c) for c in gap)}")
         lines.append("")
 
-    # Risk Categories
     risk_cats = rac.get("riskCategories", [])
     if risk_cats and isinstance(risk_cats, list):
-        lines.append("### Risk Categories")
+        lines.append("Risk Categories")
         lines.append("")
         for cat in risk_cats:
             if not isinstance(cat, dict):
                 continue
             cat_name = cat.get("categoryName", "Unknown")
-            lines.append(f"#### {cat_name}")
+            lines.append(f"{cat_name}")
 
             risks = cat.get("risks", [])
             if isinstance(risks, list):
@@ -581,9 +556,9 @@ def flatten_risk_and_controls(record: dict) -> list[str]:
                     severity = risk.get("severity", "")
                     reason = risk.get("applicabilityReason", "")
 
-                    lines.append(f"- **{risk_id}** (Severity: {severity})")
+                    lines.append(f"  {risk_id} (Severity: {severity})")
                     if reason:
-                        lines.append(f"  - Reason: {reason}")
+                        lines.append(f"    Reason: {reason}")
 
                     mapped = risk.get("mappedControlIds", [])
                     if isinstance(mapped, list):
@@ -592,9 +567,9 @@ def flatten_risk_and_controls(record: dict) -> list[str]:
                                 ctrl_id = ctrl.get("controlId", "")
                                 ctrl_name = ctrl.get("controlName", "")
                                 ctrl_desc = ctrl.get("controlDescription", "")
-                                lines.append(f"  - Control: **{ctrl_id}** — {ctrl_name}")
+                                lines.append(f"    Control: {ctrl_id} - {ctrl_name}")
                                 if ctrl_desc:
-                                    lines.append(f"    - {ctrl_desc}")
+                                    lines.append(f"      {ctrl_desc}")
             lines.append("")
 
     return lines

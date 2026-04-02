@@ -1,14 +1,17 @@
 """
-Pipeline: staging-fusefy-frameworks → S3 (section-based) → Bedrock KB
+Pipeline: staging-fusefy-frameworks → S3 (plain text, section-based) → Pinecone
 
 Each framework is split into individual section files:
 
   s3://{BUCKET}/frameworks-v2/{frameworkId}/
-      ├── fw_01_overview.md              + .metadata.json
-      └── fw_02_policy_references.md     + .metadata.json
+      ├── fw_01_overview.txt              + .metadata.json
+      └── fw_02_policy_references.txt     + .metadata.json
 
-Each section has its own .metadata.json with:
-  - framework_id, framework_name, section, doc_type
+Pinecone approach:
+  - First level: keyword-based metadata filtering (framework_id, name, doc_type, etc.)
+  - Second level: vector similarity on plain text content for detail matching
+  - No markdown formatting — Pinecone embeddings work best with clean plain text
+  - Whole field data taken as-is from DynamoDB (no auto-chunking)
 """
 
 import os
@@ -26,7 +29,7 @@ S3_BUCKET = os.getenv("S3_BUCKET", "dynamo-to-opensearch-rag-frameworks")
 S3_PREFIX = "frameworks-v2"
 
 KNOWLEDGE_BASE_ID = os.getenv("KNOWLEDGE_BASE_ID_V2") or os.getenv("KNOWLEDGE_BASE_ID", "ZTCXPOQTKW")
-DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID_FRAMEWORKS_V2", "")
+DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID_V2", "")
 
 FRAMEWORKS_TABLE = os.getenv("DYNAMODB_TABLE", "staging-fusefy-frameworks")
 CLOUD_ID = os.getenv("CLOUD_ID", "")
@@ -61,15 +64,16 @@ def scan_table(table_name: str) -> list[dict]:
 
 
 def upload_section(bucket: str, folder: str, filename: str, content: str, metadata: dict):
-    s3_key = f"{folder}/{filename}.md"
-    meta_key = f"{folder}/{filename}.md.metadata.json"
-    s3.put_object(Bucket=bucket, Key=s3_key, Body=content.encode("utf-8"), ContentType="text/markdown")
+    """Upload a single .txt + .metadata.json to S3."""
+    s3_key = f"{folder}/{filename}.txt"
+    meta_key = f"{folder}/{filename}.txt.metadata.json"
+    s3.put_object(Bucket=bucket, Key=s3_key, Body=content.encode("utf-8"), ContentType="text/plain")
     s3.put_object(Bucket=bucket, Key=meta_key, Body=json.dumps(metadata, indent=2).encode("utf-8"), ContentType="application/json")
     print(f"    ✓ {s3_key} ({len(content)} chars)")
 
 
 # ───────────────────────────────────────────────────────────────────
-# METADATA BUILDER
+# PINECONE METADATA BUILDER — keyword fields for first-level filtering
 # ───────────────────────────────────────────────────────────────────
 def build_section_metadata(record: dict, section_name: str, extra: dict = None) -> dict:
     fw_id = record.get("id", "unknown")
@@ -83,56 +87,72 @@ def build_section_metadata(record: dict, section_name: str, extra: dict = None) 
             "doc_type": "framework",
         }
     }
+
+    # Add rich keyword fields for Pinecone first-level filtering
+    if record.get("owner"):
+        meta["metadataAttributes"]["owner"] = record["owner"]
+    if record.get("assessmentCategory"):
+        cats = record["assessmentCategory"]
+        meta["metadataAttributes"]["assessment_categories"] = ", ".join(str(c) for c in cats) if isinstance(cats, list) else str(cats)
+    if record.get("region"):
+        regions = record["region"]
+        meta["metadataAttributes"]["regions"] = ", ".join(str(r) for r in regions) if isinstance(regions, list) else str(regions)
+    if record.get("verticals"):
+        verticals = record["verticals"]
+        meta["metadataAttributes"]["verticals"] = ", ".join(str(v) for v in verticals) if isinstance(verticals, list) else str(verticals)
+    if record.get("searchAttributesAsJson"):
+        meta["metadataAttributes"]["search_keywords"] = str(record["searchAttributesAsJson"])
+
     if extra:
         meta["metadataAttributes"].update(extra)
     return meta
 
 
 # ───────────────────────────────────────────────────────────────────
-# FLATTEN FUNCTIONS — one per section
+# FLATTEN FUNCTIONS — plain text output, one per section
 # ───────────────────────────────────────────────────────────────────
 def flatten_fw_overview(record: dict) -> list[str]:
-    """Section fw_01_overview — core framework details."""
+    """Section fw_01_overview — core framework details in plain text."""
     lines = []
     fw_id = record.get("id", "Unknown")
     name = record.get("name", "Unknown")
 
-    lines.append(f"## Framework Overview")
+    lines.append("Framework Overview")
     lines.append("")
 
     if record.get("description"):
-        lines.append(f"**Description:** {record['description']}")
+        lines.append(f"Description: {record['description']}")
     if record.get("owner"):
-        lines.append(f"**Owner:** {record['owner']}")
+        lines.append(f"Owner: {record['owner']}")
     if record.get("count") is not None:
-        lines.append(f"**Total Controls:** {record['count']}")
+        lines.append(f"Total Controls: {record['count']}")
 
     if record.get("assessmentCategory"):
         cats = record["assessmentCategory"]
         if isinstance(cats, list):
-            lines.append(f"**Assessment Categories:** {', '.join(str(c) for c in cats)}")
+            lines.append(f"Assessment Categories: {', '.join(str(c) for c in cats)}")
         else:
-            lines.append(f"**Assessment Categories:** {cats}")
+            lines.append(f"Assessment Categories: {cats}")
 
     if record.get("region"):
         regions = record["region"]
         if isinstance(regions, list):
-            lines.append(f"**Regions:** {', '.join(str(r) for r in regions)}")
+            lines.append(f"Regions: {', '.join(str(r) for r in regions)}")
         else:
-            lines.append(f"**Regions:** {regions}")
+            lines.append(f"Regions: {regions}")
 
     if record.get("verticals"):
         verticals = record["verticals"]
         if isinstance(verticals, list):
-            lines.append(f"**Verticals:** {', '.join(str(v) for v in verticals)}")
+            lines.append(f"Verticals: {', '.join(str(v) for v in verticals)}")
         else:
-            lines.append(f"**Verticals:** {verticals}")
+            lines.append(f"Verticals: {verticals}")
 
     if record.get("searchAttributesAsJson"):
-        lines.append(f"**Search Keywords:** {record['searchAttributesAsJson']}")
+        lines.append(f"Search Keywords: {record['searchAttributesAsJson']}")
 
     if record.get("frameWorkImgUrl"):
-        lines.append(f"**Framework Image:** {record['frameWorkImgUrl']}")
+        lines.append(f"Framework Image URL: {record['frameWorkImgUrl']}")
 
     # Catch-all for any other fields not explicitly handled
     handled_keys = {
@@ -144,38 +164,38 @@ def flatten_fw_overview(record: dict) -> list[str]:
     extra_fields = {k: v for k, v in record.items() if k not in handled_keys and v is not None}
     if extra_fields:
         lines.append("")
-        lines.append("### Additional Information")
+        lines.append("Additional Information:")
         for key, val in extra_fields.items():
             if isinstance(val, (list, dict)):
-                lines.append(f"- **{key}:** {json.dumps(val, default=str)}")
+                lines.append(f"  {key}: {json.dumps(val, default=str)}")
             else:
-                lines.append(f"- **{key}:** {val}")
+                lines.append(f"  {key}: {val}")
 
     return lines
 
 
 def flatten_fw_policy_references(record: dict) -> list[str]:
-    """Section fw_02_policy_references — policy documents and links."""
+    """Section fw_02_policy_references — policy documents and links in plain text."""
     lines = []
     has_content = False
 
     if record.get("policyDocuments"):
         docs = record["policyDocuments"]
         if isinstance(docs, list) and docs:
-            lines.append("## Policy Documents")
+            lines.append("Policy Documents:")
             lines.append("")
             for i, doc in enumerate(docs, 1):
-                lines.append(f"{i}. [{doc}]({doc})")
+                lines.append(f"  {i}. {doc}")
             lines.append("")
             has_content = True
 
     if record.get("policyLinks"):
         links = record["policyLinks"]
         if isinstance(links, list) and links:
-            lines.append("## Policy Links")
+            lines.append("Policy Links:")
             lines.append("")
             for i, link in enumerate(links, 1):
-                lines.append(f"{i}. [{link}]({link})")
+                lines.append(f"  {i}. {link}")
             lines.append("")
             has_content = True
 
@@ -194,10 +214,10 @@ def upload_framework_sections(record: dict) -> int:
     folder = f"{S3_PREFIX}/{fw_id}"
     uploaded = 0
 
-    # Header prepended to every section
+    # Header prepended to every section — plain text
     fw_header = (
-        f"**Framework:** {fw_name}\n"
-        f"**Framework ID:** {fw_id}\n\n"
+        f"Framework: {fw_name}\n"
+        f"Framework ID: {fw_id}\n\n"
     )
 
     section_defs = [
@@ -229,7 +249,7 @@ def upload_framework_sections(record: dict) -> int:
 # ───────────────────────────────────────────────────────────────────
 def scan_and_upload():
     print(f"\n{'='*60}")
-    print(f"  Frameworks — Section-Based Pipeline")
+    print(f"  Frameworks — Plain Text Pipeline (Pinecone)")
     print(f"  Table:  {FRAMEWORKS_TABLE}")
     print(f"  S3:     s3://{S3_BUCKET}/{S3_PREFIX}/")
     print(f"{'='*60}")
@@ -302,7 +322,7 @@ def sync_knowledge_base():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  Frameworks → S3 (Section-Based) → Bedrock KB")
+    print("  Frameworks → S3 (Plain Text) → Pinecone")
     print(f"  Table: {FRAMEWORKS_TABLE}")
     print(f"  S3:    s3://{S3_BUCKET}/{S3_PREFIX}/")
     print("=" * 60)

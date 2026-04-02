@@ -1,13 +1,15 @@
 """
-Pipeline: staging-fusefy-controls → S3 → Bedrock KB
+Pipeline: staging-fusefy-controls → S3 (plain text) → Pinecone
 
 Each control produces a single consolidated file:
 
-  s3://{BUCKET}/controls-v2/{controlId}.md             (all sections combined)
-  s3://{BUCKET}/controls-v2/{controlId}.md.metadata.json
+  s3://{BUCKET}/controls-v2/{controlId}.txt             (all sections combined)
+  s3://{BUCKET}/controls-v2/{controlId}.metadata.json
 
-Metadata contains:
-  - id, frameworksAssociated, maturityLevel, aiLifecycleStage, trustworthyAiControl
+Pinecone approach:
+  - First level: keyword-based metadata filtering (control_id, doc_type, maturity, etc.)
+  - Second level: vector similarity on plain text content for detail matching
+  - No markdown formatting — plain text only
 """
 
 import os
@@ -25,7 +27,7 @@ S3_BUCKET = os.getenv("S3_BUCKET", "dynamo-to-opensearch-rag-frameworks")
 S3_PREFIX = "controls-v2"
 
 KNOWLEDGE_BASE_ID = os.getenv("KNOWLEDGE_BASE_ID_V2") or os.getenv("KNOWLEDGE_BASE_ID", "ZTCXPOQTKW")
-DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID_CONTROLS_V2", "")
+DATA_SOURCE_ID = os.getenv("DATA_SOURCE_ID_V2", "")
 
 CONTROLS_TABLE = os.getenv("DYNAMODB_CONTROLS_TABLE", "staging-fusefy-controls")
 FRAMEWORKS_TABLE = os.getenv("DYNAMODB_TABLE", "staging-fusefy-frameworks")
@@ -124,8 +126,9 @@ def scan_table(table_name: str) -> list[dict]:
 
 
 def upload_file(bucket: str, s3_key: str, content: str, metadata: dict):
+    """Upload plain text + metadata JSON."""
     meta_key = f"{s3_key}.metadata.json"
-    s3.put_object(Bucket=bucket, Key=s3_key, Body=content.encode("utf-8"), ContentType="text/markdown")
+    s3.put_object(Bucket=bucket, Key=s3_key, Body=content.encode("utf-8"), ContentType="text/plain")
     s3.put_object(Bucket=bucket, Key=meta_key, Body=json.dumps(metadata, indent=2).encode("utf-8"), ContentType="application/json")
     print(f"    ✓ {s3_key} ({len(content)} chars)")
 
@@ -144,6 +147,16 @@ def get_hierarchy(record: dict) -> str | None:
     return None
 
 
+def get_specific_cloud(record: dict) -> str:
+    CLOUD_PROVIDERS = {"AWS", "Azure", "GCP", "Multi-Cloud"}
+    name_field = record.get("name", [])
+    if isinstance(name_field, list) and name_field:
+        last = str(name_field[-1])
+        if last in CLOUD_PROVIDERS:
+            return last
+    return ""
+
+
 def get_associated_framework_ids(record: dict) -> list[str]:
     fc_ids = record.get("frameworkControlIds", [])
     fw_ids = []
@@ -160,7 +173,6 @@ def get_associated_framework_ids(record: dict) -> list[str]:
 # METADATA BUILDER
 # ───────────────────────────────────────────────────────────────────
 def get_maturity_levels(record: dict) -> list[str]:
-    """Return level keys (e.g. 'Level 2') where the DynamoDB value has a ✓."""
     levels = []
     for lvl in range(1, 7):
         key = f"Level {lvl}"
@@ -171,61 +183,68 @@ def get_maturity_levels(record: dict) -> list[str]:
 
 
 def build_control_metadata(record: dict) -> dict:
-    return {
-        "metadataAttributes": {
-            "cloudId": CLOUD_ID,
-            "id": record.get("id", "unknown"),
-            "frameworksAssociated": get_associated_framework_ids(record),
-            "maturityLevel": get_maturity_levels(record),
-            "aiLifecycleStage": record.get("aiLifecycleStage", ""),
-            "trustworthyAiControl": record.get("trustworthyAiControl", ""),
-        }
+    attrs = {
+        "cloudId": CLOUD_ID,
+        "control_id": record.get("id") or "unknown",
+        "doc_type": "control",
+        "section": "ctrl_overview",
+        "frameworksAssociated": ", ".join(get_associated_framework_ids(record)),
+        "maturityLevel": ", ".join(get_maturity_levels(record)),
+        "aiLifecycleStage": record.get("aiLifecycleStage") or "",
+        "trustworthyAiControl": record.get("trustworthyAiControl") or "",
+        "specificCloud": get_specific_cloud(record),
     }
+    # Pinecone rejects empty string metadata values — drop them
+    return {"metadataAttributes": {k: v for k, v in attrs.items() if v}}
 
 
 # ───────────────────────────────────────────────────────────────────
-# FLATTEN FUNCTIONS — one per section
+# FLATTEN FUNCTIONS — plain text output, one per section
 # ───────────────────────────────────────────────────────────────────
 def flatten_ctrl_overview(record: dict) -> list[str]:
-    """Section ctrl_01_overview — core control details."""
+    """Section ctrl_01_overview — core control details in plain text."""
     lines = []
     ctrl_id = record.get("id", "Unknown")
     display_name = get_display_name(record)
     hierarchy = get_hierarchy(record)
 
-    lines.append("## Control Overview")
+    lines.append("Control Overview")
     lines.append("")
 
     if hierarchy:
-        lines.append(f"**Hierarchy:** {hierarchy}")
+        lines.append(f"Hierarchy: {hierarchy}")
 
     if record.get("description"):
-        lines.append(f"**Description:** {record['description']}")
+        lines.append(f"Description: {record['description']}")
 
     if record.get("questionaire"):
-        lines.append(f"**Assessment Question:** {record['questionaire']}")
+        lines.append(f"Assessment Question: {record['questionaire']}")
 
     if record.get("aiLifecycleStage"):
-        lines.append(f"**AI Lifecycle Stage:** {record['aiLifecycleStage']}")
+        lines.append(f"AI Lifecycle Stage: {record['aiLifecycleStage']}")
 
     if record.get("trustworthyAiControl"):
-        lines.append(f"**Trustworthy AI Control Category:** {record['trustworthyAiControl']}")
+        lines.append(f"Trustworthy AI Control Category: {record['trustworthyAiControl']}")
+
+    specific_cloud = get_specific_cloud(record)
+    if specific_cloud:
+        lines.append(f"Cloud Native Platform: {specific_cloud}")
 
     if record.get("assessmentCategory"):
         cats = record["assessmentCategory"]
         if isinstance(cats, list):
-            lines.append(f"**Assessment Categories:** {', '.join(str(c) for c in cats)}")
+            lines.append(f"Assessment Categories: {', '.join(str(c) for c in cats)}")
         else:
-            lines.append(f"**Assessment Categories:** {cats}")
+            lines.append(f"Assessment Categories: {cats}")
 
     if record.get("gradingTypesFormat"):
-        lines.append(f"**Grading Format:** {record['gradingTypesFormat']}")
+        lines.append(f"Grading Format: {record['gradingTypesFormat']}")
 
     if record.get("searchAttributesAsJson"):
-        lines.append(f"**Search Keywords:** {record['searchAttributesAsJson']}")
+        lines.append(f"Search Keywords: {record['searchAttributesAsJson']}")
 
     if record.get("tcoIds"):
-        lines.append(f"**TCO ID:** {record['tcoIds']}")
+        lines.append(f"TCO ID: {record['tcoIds']}")
 
     # Catch-all
     handled_keys = {
@@ -239,18 +258,18 @@ def flatten_ctrl_overview(record: dict) -> list[str]:
     extra = {k: v for k, v in record.items() if k not in handled_keys and v is not None}
     if extra:
         lines.append("")
-        lines.append("### Additional Information")
+        lines.append("Additional Information:")
         for key, val in extra.items():
             if isinstance(val, (list, dict)):
-                lines.append(f"- **{key}:** {json.dumps(val, default=str)}")
+                lines.append(f"  {key}: {json.dumps(val, default=str)}")
             else:
-                lines.append(f"- **{key}:** {val}")
+                lines.append(f"  {key}: {val}")
 
     return lines
 
 
 def flatten_ctrl_maturity_levels(record: dict) -> list[str]:
-    """Section ctrl_02_maturity_levels — AI maturity level detail."""
+    """Section ctrl_02_maturity_levels — AI maturity level detail in plain text."""
     active_levels = []
     for lvl_key in ["Level 1", "Level 2", "Level 3", "Level 4", "Level 5", "Level 6"]:
         val = record.get(lvl_key, "")
@@ -266,16 +285,16 @@ def flatten_ctrl_maturity_levels(record: dict) -> list[str]:
         return []
 
     lines = []
-    lines.append("## AI Maturity Levels")
+    lines.append("AI Maturity Levels")
     lines.append("")
 
     for lvl in active_levels:
-        lines.append(f"### {lvl['key']}: {lvl['name']}")
-        lines.append(f"{lvl['description']}")
+        lines.append(f"{lvl['key']}: {lvl['name']}")
+        lines.append(f"  {lvl['description']}")
         lines.append("")
 
     lines.append(
-        f"This control is applicable at the **{', '.join(l['name'] for l in active_levels)}** "
+        f"This control is applicable at the {', '.join(l['name'] for l in active_levels)} "
         f"maturity stage(s) of an organization's AI adoption journey."
     )
 
@@ -283,13 +302,13 @@ def flatten_ctrl_maturity_levels(record: dict) -> list[str]:
 
 
 def flatten_ctrl_framework_associations(record: dict, framework_lookup: dict) -> list[str]:
-    """Section ctrl_03_framework_associations — which frameworks this control belongs to."""
+    """Section ctrl_03_framework_associations — which frameworks this control belongs to, plain text."""
     fc_ids = record.get("frameworkControlIds", [])
     if not isinstance(fc_ids, list) or not fc_ids:
         return []
 
     lines = []
-    lines.append("## Associated Frameworks")
+    lines.append("Associated Frameworks")
     lines.append("")
 
     count = 0
@@ -300,34 +319,34 @@ def flatten_ctrl_framework_associations(record: dict, framework_lookup: dict) ->
                 fw = framework_lookup.get(fw_id)
                 if fw:
                     fw_name = fw.get("name", "Unknown")
-                    lines.append(f"### {count}. {fw_name} ({fw_id})")
-                    lines.append(f"- **Domain:** {domain}")
+                    lines.append(f"{count}. {fw_name} ({fw_id})")
+                    lines.append(f"   Domain: {domain}")
                     if fw.get("description"):
-                        lines.append(f"- **Description:** {fw['description']}")
+                        lines.append(f"   Description: {fw['description']}")
                     if fw.get("owner"):
-                        lines.append(f"- **Owner:** {fw['owner']}")
+                        lines.append(f"   Owner: {fw['owner']}")
                     if fw.get("region"):
                         regions = fw["region"]
                         if isinstance(regions, list):
-                            lines.append(f"- **Regions:** {', '.join(str(r) for r in regions)}")
+                            lines.append(f"   Regions: {', '.join(str(r) for r in regions)}")
                         else:
-                            lines.append(f"- **Regions:** {regions}")
+                            lines.append(f"   Regions: {regions}")
                     if fw.get("verticals"):
                         verts = fw["verticals"]
                         if isinstance(verts, list):
-                            lines.append(f"- **Verticals:** {', '.join(str(v) for v in verts)}")
+                            lines.append(f"   Verticals: {', '.join(str(v) for v in verts)}")
                         else:
-                            lines.append(f"- **Verticals:** {verts}")
+                            lines.append(f"   Verticals: {verts}")
                     if fw.get("assessmentCategory"):
                         cats = fw["assessmentCategory"]
                         if isinstance(cats, list):
-                            lines.append(f"- **Assessment Categories:** {', '.join(str(c) for c in cats)}")
+                            lines.append(f"   Assessment Categories: {', '.join(str(c) for c in cats)}")
                         else:
-                            lines.append(f"- **Assessment Categories:** {cats}")
+                            lines.append(f"   Assessment Categories: {cats}")
                     lines.append("")
                 else:
-                    lines.append(f"### {count}. {fw_id}")
-                    lines.append(f"- **Domain:** {domain}")
+                    lines.append(f"{count}. {fw_id}")
+                    lines.append(f"   Domain: {domain}")
                     lines.append("")
 
     if count == 0:
@@ -344,8 +363,8 @@ def upload_control(record: dict, framework_lookup: dict) -> int:
     display_name = get_display_name(record)
 
     header = (
-        f"**Control:** {display_name}\n"
-        f"**Control ID:** {ctrl_id}\n\n"
+        f"Control: {display_name}\n"
+        f"Control ID: {ctrl_id}\n\n"
     )
 
     parts: list[str] = []
@@ -370,7 +389,7 @@ def upload_control(record: dict, framework_lookup: dict) -> int:
 
     content = header + "\n\n".join(parts)
     metadata = build_control_metadata(record)
-    s3_key = f"{S3_PREFIX}/{ctrl_id}.md"
+    s3_key = f"{S3_PREFIX}/{ctrl_id}.txt"
     upload_file(S3_BUCKET, s3_key, content, metadata)
     return 1
 
@@ -380,7 +399,7 @@ def upload_control(record: dict, framework_lookup: dict) -> int:
 # ───────────────────────────────────────────────────────────────────
 def scan_and_upload():
     print(f"\n{'='*60}")
-    print(f"  Controls — Consolidated Pipeline")
+    print(f"  Controls — Plain Text Pipeline (Pinecone)")
     print(f"  Table:  {CONTROLS_TABLE}")
     print(f"  S3:     s3://{S3_BUCKET}/{S3_PREFIX}/")
     print(f"{'='*60}")
@@ -470,7 +489,7 @@ def sync_knowledge_base():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  Controls → S3 → Bedrock KB")
+    print("  Controls → S3 (Plain Text) → Pinecone")
     print(f"  Table: {CONTROLS_TABLE}")
     print(f"  S3:    s3://{S3_BUCKET}/{S3_PREFIX}/")
     print("=" * 60)

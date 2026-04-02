@@ -1,20 +1,13 @@
 """
-Pipeline: staging-fusefy-controls → S3 → Bedrock KB
+Pipeline: staging-fusefy-controls → S3 (plain text) → Pinecone
 
-Standalone controls pipeline — each control gets its own enriched markdown
+Standalone controls pipeline — each control gets its own enriched plain text
 document with full details including AI maturity level context.
 
-The Level 1-6 fields map to AI Maturity Levels:
-  Level 1: AI Discovery
-  Level 2: AI Pilot Projects
-  Level 3: AI Strategic Applications
-  Level 4: AI Business Integration
-  Level 5: AI Optimization
-  Level 6: AI Autonomy
-
-Each control document includes the maturity level name and description
-so RAG can answer queries like "which controls are at Level 3?" or
-"show me all controls for AI Strategic Applications maturity".
+Pinecone approach:
+  - First level: keyword-based metadata filtering
+  - Second level: vector similarity on plain text content
+  - No markdown formatting — plain text only
 """
 
 import os
@@ -139,20 +132,20 @@ def scan_table(table_name: str) -> list[dict]:
 
 
 # ───────────────────────────────────────────────────────────────────
-# 3. FLATTEN a control record into enriched markdown for RAG
+# 3. FLATTEN a control record into enriched plain text for RAG
 # ───────────────────────────────────────────────────────────────────
 def flatten_control_for_rag(record: dict, framework_lookup: dict = None) -> str:
     """
-    Convert an unmarshalled control record into a rich markdown document
+    Convert an unmarshalled control record into a rich plain text document
     with AI maturity level context and full framework details embedded
-    for optimal RAG retrieval.
+    for optimal RAG retrieval. No markdown formatting.
     """
     if framework_lookup is None:
         framework_lookup = {}
     lines = []
     ctrl_id = record.get("id", "Unknown")
 
-    # ── Name: hierarchical list → display name + hierarchy ──
+    # Name: hierarchical list → display name + hierarchy
     name_field = record.get("name", [])
     if isinstance(name_field, list) and name_field:
         display_name = name_field[-1]
@@ -161,34 +154,34 @@ def flatten_control_for_rag(record: dict, framework_lookup: dict = None) -> str:
         display_name = str(name_field) if name_field else "Unknown"
         hierarchy = None
 
-    lines.append(f"# Control: {display_name}")
-    lines.append(f"**Control ID:** {ctrl_id}")
+    lines.append(f"Control: {display_name}")
+    lines.append(f"Control ID: {ctrl_id}")
     lines.append("")
 
     if hierarchy:
-        lines.append(f"**Control Hierarchy:** {hierarchy}")
+        lines.append(f"Control Hierarchy: {hierarchy}")
 
-    # ── Core Fields ──
+    # Core Fields
     if record.get("questionaire"):
-        lines.append(f"**Assessment Question:** {record['questionaire']}")
+        lines.append(f"Assessment Question: {record['questionaire']}")
 
     if record.get("aiLifecycleStage"):
-        lines.append(f"**AI Lifecycle Stage:** {record['aiLifecycleStage']}")
+        lines.append(f"AI Lifecycle Stage: {record['aiLifecycleStage']}")
 
     if record.get("trustworthyAiControl"):
-        lines.append(f"**Trustworthy AI Control Category:** {record['trustworthyAiControl']}")
+        lines.append(f"Trustworthy AI Control Category: {record['trustworthyAiControl']}")
 
     if record.get("assessmentCategory"):
         cats = record["assessmentCategory"]
         if isinstance(cats, list):
-            lines.append(f"**Assessment Categories:** {', '.join(str(c) for c in cats)}")
+            lines.append(f"Assessment Categories: {', '.join(str(c) for c in cats)}")
         else:
-            lines.append(f"**Assessment Categories:** {cats}")
+            lines.append(f"Assessment Categories: {cats}")
 
     if record.get("gradingTypesFormat"):
-        lines.append(f"**Grading Format:** {record['gradingTypesFormat']}")
+        lines.append(f"Grading Format: {record['gradingTypesFormat']}")
 
-    # ── AI Maturity Level (the key enrichment) ──
+    # AI Maturity Level (the key enrichment)
     active_levels = []
     for lvl_key in ["Level 1", "Level 2", "Level 3", "Level 4", "Level 5", "Level 6"]:
         val = record.get(lvl_key, "")
@@ -202,26 +195,26 @@ def flatten_control_for_rag(record: dict, framework_lookup: dict = None) -> str:
 
     if active_levels:
         lines.append("")
-        lines.append(f"## AI Maturity Level")
+        lines.append("AI Maturity Level")
         lines.append("")
         for lvl in active_levels:
-            lines.append(f"**{lvl['key']}: {lvl['name']}**")
-            lines.append(f"{lvl['description']}")
+            lines.append(f"{lvl['key']}: {lvl['name']}")
+            lines.append(f"  {lvl['description']}")
             lines.append("")
         lines.append(
-            f"This control is applicable at the **{', '.join(l['name'] for l in active_levels)}** "
+            f"This control is applicable at the {', '.join(l['name'] for l in active_levels)} "
             f"maturity stage(s) of an organization's AI adoption journey."
         )
     else:
         lines.append("")
-        lines.append("**AI Maturity Level:** Not assigned")
+        lines.append("AI Maturity Level: Not assigned")
 
-    # ── Framework Associations (enriched from staging-fusefy-frameworks) ──
+    # Framework Associations (enriched from staging-fusefy-frameworks)
     if record.get("frameworkControlIds"):
         fc_ids = record["frameworkControlIds"]
         if isinstance(fc_ids, list) and fc_ids:
             lines.append("")
-            lines.append("## Associated Frameworks")
+            lines.append("Associated Frameworks")
             lines.append("")
             for item in fc_ids:
                 if isinstance(item, dict):
@@ -229,42 +222,42 @@ def flatten_control_for_rag(record: dict, framework_lookup: dict = None) -> str:
                         fw = framework_lookup.get(fw_id)
                         if fw:
                             fw_name = fw.get("name", "Unknown")
-                            lines.append(f"### {fw_name} ({fw_id})")
-                            lines.append(f"- **Domain:** {domain}")
+                            lines.append(f"  {fw_name} ({fw_id})")
+                            lines.append(f"    Domain: {domain}")
                             if fw.get("description"):
-                                lines.append(f"- **Description:** {fw['description']}")
+                                lines.append(f"    Description: {fw['description']}")
                             if fw.get("owner"):
-                                lines.append(f"- **Owner:** {fw['owner']}")
+                                lines.append(f"    Owner: {fw['owner']}")
                             if fw.get("region"):
                                 regions = fw["region"]
                                 if isinstance(regions, list):
-                                    lines.append(f"- **Regions:** {', '.join(str(r) for r in regions)}")
+                                    lines.append(f"    Regions: {', '.join(str(r) for r in regions)}")
                                 else:
-                                    lines.append(f"- **Regions:** {regions}")
+                                    lines.append(f"    Regions: {regions}")
                             if fw.get("verticals"):
                                 verts = fw["verticals"]
                                 if isinstance(verts, list):
-                                    lines.append(f"- **Verticals:** {', '.join(str(v) for v in verts)}")
+                                    lines.append(f"    Verticals: {', '.join(str(v) for v in verts)}")
                                 else:
-                                    lines.append(f"- **Verticals:** {verts}")
+                                    lines.append(f"    Verticals: {verts}")
                             if fw.get("assessmentCategory"):
                                 cats = fw["assessmentCategory"]
                                 if isinstance(cats, list):
-                                    lines.append(f"- **Assessment Categories:** {', '.join(str(c) for c in cats)}")
+                                    lines.append(f"    Assessment Categories: {', '.join(str(c) for c in cats)}")
                                 else:
-                                    lines.append(f"- **Assessment Categories:** {cats}")
+                                    lines.append(f"    Assessment Categories: {cats}")
                             lines.append("")
                         else:
-                            lines.append(f"- **{fw_id}** — Domain: {domain}")
+                            lines.append(f"  {fw_id} — Domain: {domain}")
                 else:
-                    lines.append(f"- {item}")
+                    lines.append(f"  {item}")
 
-    # ── Search Keywords ──
+    # Search Keywords
     if record.get("searchAttributesAsJson"):
         lines.append("")
-        lines.append(f"**Search Keywords:** {record['searchAttributesAsJson']}")
+        lines.append(f"Search Keywords: {record['searchAttributesAsJson']}")
 
-    # ── Catch-all for any other fields ──
+    # Catch-all for any other fields
     handled_keys = {
         "id", "name", "questionaire", "aiLifecycleStage",
         "trustworthyAiControl", "assessmentCategory",
@@ -276,12 +269,12 @@ def flatten_control_for_rag(record: dict, framework_lookup: dict = None) -> str:
     extra = {k: v for k, v in record.items() if k not in handled_keys and v is not None}
     if extra:
         lines.append("")
-        lines.append("## Additional Information")
+        lines.append("Additional Information:")
         for key, val in extra.items():
             if isinstance(val, (list, dict)):
-                lines.append(f"- **{key}:** {json.dumps(val, default=str)}")
+                lines.append(f"  {key}: {json.dumps(val, default=str)}")
             else:
-                lines.append(f"- **{key}:** {val}")
+                lines.append(f"  {key}: {val}")
 
     return "\n".join(lines)
 
@@ -292,7 +285,7 @@ def flatten_control_for_rag(record: dict, framework_lookup: dict = None) -> str:
 def scan_and_upload():
     """Scan all controls, flatten with maturity context, upload to S3."""
     print(f"\n{'='*60}")
-    print(f"  Controls Pipeline")
+    print(f"  Controls Pipeline (Plain Text)")
     print(f"  Table:  {CONTROLS_TABLE}")
     print(f"  S3:     s3://{S3_BUCKET}/{S3_PREFIX}/")
     print(f"{'='*60}")
@@ -342,7 +335,7 @@ def scan_and_upload():
     else:
         print("  No existing files to delete.")
 
-    # Upload each control as a separate markdown file
+    # Upload each control as a separate plain text file
     print(f"\n📤 Uploading to s3://{S3_BUCKET}/{S3_PREFIX}/")
     uploaded = 0
     for record in controls:
@@ -350,13 +343,13 @@ def scan_and_upload():
             ctrl_id = record.get("id", f"unknown-{uploaded}")
 
             content = flatten_control_for_rag(record, framework_lookup)
-            s3_key = f"{S3_PREFIX}/{ctrl_id}.md"
+            s3_key = f"{S3_PREFIX}/{ctrl_id}.txt"
 
             s3.put_object(
                 Bucket=S3_BUCKET,
                 Key=s3_key,
                 Body=content.encode("utf-8"),
-                ContentType="text/markdown"
+                ContentType="text/plain"
             )
 
             # Extract display name for logging
@@ -366,7 +359,7 @@ def scan_and_upload():
             else:
                 display = str(name_field)
 
-            # Build list of associated framework IDs from frameworkControlIds field
+            # Build list of associated framework IDs
             associated_fw_ids = []
             fc_ids = record.get("frameworkControlIds", [])
             if isinstance(fc_ids, list):
@@ -376,7 +369,7 @@ def scan_and_upload():
                             if fid not in associated_fw_ids:
                                 associated_fw_ids.append(fid)
 
-            # Upload metadata file for Bedrock KB filtering
+            # Upload metadata file for Pinecone keyword-based filtering
             metadata = {
                 "metadataAttributes": {
                     "control_id": ctrl_id,
@@ -385,7 +378,7 @@ def scan_and_upload():
                     "framework_ids_associated": associated_fw_ids
                 }
             }
-            metadata_key = f"{S3_PREFIX}/{ctrl_id}.md.metadata.json"
+            metadata_key = f"{S3_PREFIX}/{ctrl_id}.metadata.json"
             s3.put_object(
                 Bucket=S3_BUCKET,
                 Key=metadata_key,
@@ -455,7 +448,7 @@ def sync_knowledge_base():
 # ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 60)
-    print("  Controls → S3 → Bedrock KB Pipeline")
+    print("  Controls → S3 (Plain Text) → Pinecone Pipeline")
     print(f"  Table: {CONTROLS_TABLE}")
     print(f"  S3:    s3://{S3_BUCKET}/{S3_PREFIX}/")
     print(f"  KB:    {KNOWLEDGE_BASE_ID}")
